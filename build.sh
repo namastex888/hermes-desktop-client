@@ -69,6 +69,35 @@ git -C "$SRC" clean -xdf -e node_modules -e apps/desktop/node_modules
 # packaging bundles only the Electron/Chromium licences, so add theirs.
 cp "$SRC/LICENSE" "$SRC/apps/desktop/LICENSE"
 
+# ------------------------------------------------------------------ icons ----
+# Upstream's build.icon is a single 1024x1024 png, so electron-builder installs
+# it to hicolor/1024x1024 — a size the hicolor index.theme does not declare.
+# GTK then reports has_icon=true but resolves no file, and the launcher shows a
+# blank tile with no dock entry. Generate the standard sizes instead.
+ICON_FLAGS=()
+if [ "$PLATFORM" = linux ]; then
+  ICONS="$SRC/apps/desktop/build-icons"
+  rm -rf "$ICONS"; mkdir -p "$ICONS"
+  if python3 -c "import PIL" 2>/dev/null; then
+    python3 - "$SRC/apps/desktop/assets/icon.png" "$ICONS" <<'PY'
+import sys
+from PIL import Image
+src, out = sys.argv[1], sys.argv[2]
+im = Image.open(src).convert("RGBA")
+for s in (16, 24, 32, 48, 64, 128, 256, 512):
+    im.resize((s, s), Image.LANCZOS).save(f"{out}/{s}x{s}.png")
+PY
+  elif command -v convert >/dev/null 2>&1; then
+    for s in 16 24 32 48 64 128 256 512; do
+      convert "$SRC/apps/desktop/assets/icon.png" -resize "${s}x${s}" "$ICONS/${s}x${s}.png"
+    done
+  else
+    echo "ERROR: need python3-pil or imagemagick to generate the icon set" >&2
+    exit 1
+  fi
+  ICON_FLAGS=(-c.linux.icon=build-icons)
+fi
+
 # ----------------------------------------------------------------- build ----
 # Everything upstream omits is supplied here as electron-builder flags, so the
 # upstream tree stays byte-identical to the tag we checked out.
@@ -78,7 +107,7 @@ npm run build
 # auto-update publish config (deb does not), and upstream sets no `repository`.
 # We ship no updater — apt / re-running install.sh is the update path — so the
 # config exists only to satisfy the packager.
-npm run builder -- "${TARGETS[@]}" --publish never \
+npm run builder -- "${TARGETS[@]}" "${ICON_FLAGS[@]}" --publish never \
   -c.extraMetadata.name="$PKG" \
   -c.extraMetadata.version="$VER" \
   -c.extraMetadata.homepage="$UPSTREAM_WEB" \
@@ -106,5 +135,8 @@ if [ "$PLATFORM" = linux ]; then
     exit 1
   fi
   grep -q 'LICENSE' <<<"$FILES" || { echo "ERROR: upstream LICENSE missing" >&2; exit 1; }
-  echo "==> clean: no server components, licence present"
+  # A single 1024x1024 icon is the bug this build works around — catch a regression.
+  SIZES=$(grep -cE 'icons/hicolor/(48x48|128x128|256x256)/apps/' <<<"$FILES")
+  [ "$SIZES" -ge 3 ] || { echo "ERROR: standard icon sizes missing (got $SIZES)" >&2; exit 1; }
+  echo "==> clean: no server components, licence + icon set present"
 fi
