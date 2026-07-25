@@ -18,12 +18,34 @@ lets `apt` handle updates.
 
 ## Install
 
+**Linux / macOS**
+
 ```sh
-sudo apt install ./hermes-desktop_<version>_amd64.deb
+curl -fsSL https://raw.githubusercontent.com/namastex888/hermes-desktop-client/main/install.sh | sh
 ```
 
-Installs to `/opt/Hermes` with a desktop entry. Then point it at a backend:
-**Settings → Gateway → Remote connection**.
+**Windows** (PowerShell)
+
+```powershell
+irm https://raw.githubusercontent.com/namastex888/hermes-desktop-client/main/install.ps1 | iex
+```
+
+| Platform | Gets | Lands in |
+|---|---|---|
+| Debian/Ubuntu | `.deb` | `/opt/Hermes` + app menu |
+| other Linux | `AppImage` | `~/.local/bin/hermes-desktop` |
+| macOS | `.dmg` | `/Applications` |
+| Windows | `.exe` | Start menu |
+
+Then point it at a backend: **Settings → Gateway → Remote connection**.
+
+### Signing
+
+Linux packages need no signing. The **macOS and Windows builds are unsigned** —
+notarisation needs a paid Apple Developer account and an Authenticode
+certificate. On macOS the installer strips the quarantine bit for you; on
+Windows, SmartScreen may warn ("More info" → "Run anyway"). If that is not
+acceptable, build locally with `./build.sh`.
 
 ## Why upstream has no .deb
 
