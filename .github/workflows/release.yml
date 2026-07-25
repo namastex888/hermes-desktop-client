@@ -23,6 +23,23 @@ jobs:
       ver: ${{ steps.v.outputs.ver }}
       needed: ${{ steps.v.outputs.needed }}
     steps:
+      - uses: actions/checkout@v4
+
+      # GitHub disables scheduled workflows after 60 days without repository
+      # activity. If upstream goes quiet that long, the cron would die and then
+      # miss the next release. Nudge the repo well before the cutoff.
+      - name: Keepalive
+        run: |
+          LAST=$(git log -1 --format=%ct)
+          AGE=$(( ( $(date +%s) - LAST ) / 86400 ))
+          echo "last commit ${AGE}d ago"
+          if [ "$AGE" -ge 50 ]; then
+            git config user.name  "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git commit --allow-empty -m "chore: keepalive (scheduled workflows expire at 60d idle)"
+            git push
+          fi
+
       - id: v
         env:
           GH_TOKEN: ${{ github.token }}
