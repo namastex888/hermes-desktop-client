@@ -107,7 +107,8 @@ npm run build
 # auto-update publish config (deb does not), and upstream sets no `repository`.
 # We ship no updater — apt / re-running install.sh is the update path — so the
 # config exists only to satisfy the packager.
-npm run builder -- "${TARGETS[@]}" "${ICON_FLAGS[@]}" --publish never \
+# ${a[@]+"${a[@]}"} — bash 3.2 (macOS) errors on an empty array under set -u.
+npm run builder -- "${TARGETS[@]}" ${ICON_FLAGS[@]+"${ICON_FLAGS[@]}"} --publish never \
   -c.extraMetadata.name="$PKG" \
   -c.extraMetadata.version="$VER" \
   -c.extraMetadata.homepage="$UPSTREAM_WEB" \
