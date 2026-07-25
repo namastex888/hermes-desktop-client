@@ -39,6 +39,10 @@ irm https://raw.githubusercontent.com/namastex888/hermes-desktop-client/main/ins
 
 Then point it at a backend: **Settings → Gateway → Remote connection**.
 
+Architectures: Linux and Windows are **x86_64**; macOS ships both **Apple
+Silicon and Intel**. The installers match your machine's architecture and stop
+with a clear message rather than fetching the wrong one.
+
 ### Signing
 
 Linux packages need no signing. The **macOS and Windows builds are unsigned** —

@@ -44,7 +44,9 @@ fi
 
 case "$PLATFORM" in
   linux) TARGETS=(--linux deb AppImage) ;;
-  mac)   TARGETS=(--mac dmg) ;;
+  # Both arches: the macOS runner is Apple Silicon, so an arm64-only build
+  # would leave Intel Macs with no installer.
+  mac)   TARGETS=(--mac dmg --x64 --arm64) ;;
   win)   TARGETS=(--win nsis) ;;
   *) echo "ERROR: unknown platform '$PLATFORM'" >&2; exit 1 ;;
 esac

@@ -32,15 +32,20 @@ asset_url() {
 
 OS=$(uname -s)
 ARCH=$(uname -m)
-[ "$ARCH" = "x86_64" ] || [ "$ARCH" = "arm64" ] || [ "$ARCH" = "aarch64" ] \
-  || fail "unsupported architecture: $ARCH"
+# electron-builder names assets per-arch; pick the matching one rather than
+# grabbing the first of a file type, or an Intel Mac gets an arm64 dmg.
+case "$ARCH" in
+  x86_64|amd64)  DEB_A=amd64; APP_A=x86_64; MAC_A=x64;   WIN_A=x64 ;;
+  arm64|aarch64) DEB_A=arm64; APP_A=arm64;  MAC_A=arm64; WIN_A=arm64 ;;
+  *) fail "unsupported architecture: $ARCH" ;;
+esac
 
 case "$OS" in
 # ------------------------------------------------------------------ linux ----
 Linux)
   if command -v dpkg >/dev/null 2>&1; then
-    URL=$(asset_url '\.deb$') || true
-    [ -n "${URL:-}" ] || fail "no .deb in the latest release"
+    URL=$(asset_url "linux-$DEB_A\.deb$") || true
+    [ -n "${URL:-}" ] || fail "no linux-$DEB_A .deb in the latest release (arch $ARCH)"
     TMP=$(mktemp -d); trap 'rm -rf "$TMP"' EXIT
     say "downloading $(basename "$URL")"
     curl -fsSL -o "$TMP/pkg.deb" "$URL"
@@ -52,8 +57,8 @@ Linux)
     fi
     say "installed. Launch 'Hermes' from your app menu."
   else
-    URL=$(asset_url '\.AppImage$') || true
-    [ -n "${URL:-}" ] || fail "no AppImage in the latest release"
+    URL=$(asset_url "linux-$APP_A\.AppImage$") || true
+    [ -n "${URL:-}" ] || fail "no linux-$APP_A AppImage in the latest release (arch $ARCH)"
     mkdir -p "$HOME/.local/bin"
     DEST="$HOME/.local/bin/hermes-desktop"
     say "downloading AppImage"
@@ -68,8 +73,8 @@ Linux)
   ;;
 # ------------------------------------------------------------------ macos ----
 Darwin)
-  URL=$(asset_url '\.dmg$') || true
-  [ -n "${URL:-}" ] || fail "no .dmg in the latest release"
+  URL=$(asset_url "mac-$MAC_A\.dmg$") || true
+  [ -n "${URL:-}" ] || fail "no mac-$MAC_A .dmg in the latest release (arch $ARCH)"
   TMP=$(mktemp -d); trap 'rm -rf "$TMP"' EXIT
   say "downloading $(basename "$URL")"
   curl -fsSL -o "$TMP/hermes.dmg" "$URL"
@@ -88,8 +93,8 @@ Darwin)
   ;;
 # ---------------------------------------------------------------- windows ----
 MINGW* | MSYS* | CYGWIN*)
-  URL=$(asset_url '\.exe$') || true
-  [ -n "${URL:-}" ] || fail "no .exe in the latest release"
+  URL=$(asset_url "win-$WIN_A\.exe$") || true
+  [ -n "${URL:-}" ] || fail "no win-$WIN_A .exe in the latest release (arch $ARCH)"
   TMP=$(mktemp -d)
   say "downloading installer"
   curl -fsSL -o "$TMP/hermes-setup.exe" "$URL"

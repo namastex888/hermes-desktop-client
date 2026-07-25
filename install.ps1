@@ -9,8 +9,10 @@ Write-Host "==> resolving latest release"
 $rel = Invoke-RestMethod "https://api.github.com/repos/$repo/releases/latest" `
     -Headers @{ "User-Agent" = "hermes-desktop-client" }
 
-$asset = $rel.assets | Where-Object { $_.name -like "*.exe" } | Select-Object -First 1
-if (-not $asset) { throw "no .exe in the latest release" }
+# Assets are named per-arch; match this machine rather than taking the first.
+$arch = if ($env:PROCESSOR_ARCHITECTURE -eq "ARM64") { "arm64" } else { "x64" }
+$asset = $rel.assets | Where-Object { $_.name -like "*win-$arch*.exe" } | Select-Object -First 1
+if (-not $asset) { throw "no win-$arch .exe in the latest release" }
 
 $out = Join-Path $env:TEMP $asset.name
 Write-Host "==> downloading $($asset.name)"
