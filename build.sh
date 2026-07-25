@@ -17,6 +17,7 @@ set -euo pipefail
 
 UPSTREAM_GIT=https://github.com/NousResearch/hermes-agent.git
 UPSTREAM_WEB=https://github.com/NousResearch/hermes-agent
+SELF_WEB=https://github.com/namastex888/hermes-desktop-client
 PKG=hermes-desktop
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -71,10 +72,15 @@ cp "$SRC/LICENSE" "$SRC/apps/desktop/LICENSE"
 # upstream tree stays byte-identical to the tag we checked out.
 cd "$SRC/apps/desktop"
 npm run build
-npm run builder -- "${TARGETS[@]}" \
+# --publish never + a repository field: the AppImage/nsis/dmg targets resolve an
+# auto-update publish config (deb does not), and upstream sets no `repository`.
+# We ship no updater — apt / re-running install.sh is the update path — so the
+# config exists only to satisfy the packager.
+npm run builder -- "${TARGETS[@]}" --publish never \
   -c.extraMetadata.name="$PKG" \
   -c.extraMetadata.version="$VER" \
   -c.extraMetadata.homepage="$UPSTREAM_WEB" \
+  -c.extraMetadata.repository="$SELF_WEB" \
   -c.extraFiles=LICENSE
 
 # --------------------------------------------------------------- collect ----
