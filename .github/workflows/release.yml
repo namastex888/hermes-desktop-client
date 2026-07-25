@@ -1,0 +1,71 @@
+name: build-and-publish
+
+# Zero-maintenance mirror: watch upstream releases, build a client-only deb,
+# publish it. No human step unless the build gate fails.
+on:
+  schedule:
+    - cron: "0 6 * * *"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Upstream tag to build (default: latest release)"
+        required: false
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve upstream tag
+        id: v
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${{ inputs.tag }}"
+          [ -n "$TAG" ] || TAG=$(gh api repos/NousResearch/hermes-agent/releases/latest --jq .tag_name)
+          echo "tag=$TAG"      >> "$GITHUB_OUTPUT"
+          echo "ver=${TAG#v}"  >> "$GITHUB_OUTPUT"
+
+      - name: Skip if already published
+        id: skip
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "${{ steps.v.outputs.tag }}" >/dev/null 2>&1; then
+            echo "done=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "done=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/setup-node@v4
+        if: steps.skip.outputs.done == 'false'
+        with:
+          node-version: 22
+
+      # Electron/fpm packaging needs these on a bare runner.
+      - name: Build deps
+        if: steps.skip.outputs.done == 'false'
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends rpm
+
+      - name: Build deb
+        if: steps.skip.outputs.done == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: ./build.sh "${{ steps.v.outputs.tag }}"
+
+      - name: Publish release
+        if: steps.skip.outputs.done == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ steps.v.outputs.tag }}" \
+            dist/hermes-desktop_${{ steps.v.outputs.ver }}_amd64.deb \
+            --title "hermes-desktop ${{ steps.v.outputs.ver }}" \
+            --notes "Client-only Linux build of upstream [${{ steps.v.outputs.tag }}](https://github.com/NousResearch/hermes-agent/releases/tag/${{ steps.v.outputs.tag }}).
+
+          No Python, no venv, no gateway — Electron client only.
+          Install: \`sudo apt install ./hermes-desktop_${{ steps.v.outputs.ver }}_amd64.deb\`"
