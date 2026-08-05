@@ -1,0 +1,11 @@
+./opt/Hermes/resources/venv/lib/python3.12/site-packages/uvicorn/__init__.py
+./opt/Hermes/resources/venv/pyvenv.cfg
+./opt/Hermes/resources/venv/bin/python3.12
+./opt/Hermes/resources/venv/
+./opt/Hermes/resources/hermes_agent/server.py
+./opt/Hermes/resources/hermes_cli/__main__.py
+./opt/Hermes/resources/app.asar.unpacked/.venv/lib/python3.11/site-packages/fastapi/__init__.py
+./opt/Hermes/resources/python3.12/bin/python3
+./opt/Hermes/resources/python3.12/lib/libpython3.12.so.1.0
+./opt/Hermes/resources/lib-dynload/_socket.cpython-312-x86_64-linux-gnu.so
+./opt/Hermes/resources/app.asar.unpacked/dist/scripts/helper.py

@@ -1,0 +1,6 @@
+./opt/Hermes/resources/app.asar.unpacked/dist/assets/python-B5eWn6H5.js
+./opt/Hermes/resources/app.asar.unpacked/dist/assets/ruby-K2mPq7Xz.js
+./opt/Hermes/resources/app.asar.unpacked/dist/node_modules/node-pty/build/Release/pty.node
+./opt/Hermes/resources/app.asar
+./usr/share/icons/hicolor/48x48/apps/Hermes.png
+./opt/Hermes/LICENSE
