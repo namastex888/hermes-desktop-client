@@ -1,3 +1,6 @@
 .work/
 dist/
 node_modules/
+
+# Local task state (SQLite). Wishes are tracked; the board that indexes them is not.
+.genie/genie.db*
