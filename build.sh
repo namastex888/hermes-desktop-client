@@ -13,6 +13,12 @@
 # Usage: ./build.sh [tag] [platform]
 #   tag       upstream tag (default: latest release)
 #   platform  linux | mac | win   (default: detected from uname)
+#
+# Usage: ./build.sh --check-paths
+#   Run the client-only classifier over newline-delimited package paths on
+#   stdin (the form emitted by `dpkg-deb -c | awk '{print $6}'`) and exit
+#   non-zero if any path is rejected. No clone, no build, no dpkg-deb —
+#   runs natively on any machine with bash.
 set -euo pipefail
 
 UPSTREAM_GIT=https://github.com/NousResearch/hermes-agent.git
@@ -24,6 +30,106 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORK="${WORK:-$HERE/.work}"
 OUT="${OUT:-$HERE/dist}"
 SRC="$WORK/src"
+
+# ----------------------------------------------------------------- gate ----
+# client_only_check — rule-based classifier for the client-only guarantee.
+#
+# Reads newline-delimited package paths on stdin, normalises each line
+# (strip a leading "./" and a trailing "/" — the real form of dpkg-deb -c
+# output), then matches PER PATH SEGMENT. A path is rejected when the first
+# of these rules fires:
+#
+#   1  basename ends in .py                     python source
+#   2  basename matches *cpython-*.so           CPython extension module
+#   3  a segment is exactly site-packages/venv/.venv   venv layout
+#   4  basename is exactly pyvenv.cfg           venv marker
+#   5  a segment is exactly hermes_agent/hermes_cli    upstream server module
+#   6  basename matches ^python[0-9]*(\.[0-9]+)*$      bare interpreter
+#   7  a segment matches ^python[0-9]+\.[0-9]+$        interpreter home
+#
+# Rules 6 and 7 are ANCHORED whole-token matches. That anchoring is the
+# entire fix: the old gate grep'd the bare substring `python` and falsely
+# fired on dist/assets/python-B5eWn6H5.js — a CodeMirror keyword table for
+# the Python syntax mode (a JS object literal, not a runtime). The anchored
+# rules leave python-B5eWn6H5.js (hyphen + .js extension) and ruby-*.js
+# (the next language mode upstream lazily loads) untouched, while still
+# catching a bare interpreter at resources/python3.12/bin/python3 and an
+# interpreter home at resources/python3.12/ — neither of which carries any
+# structural marker other than its name. If these name-shaped rules ever
+# drift back toward substring matching, the must-accept fixtures fail
+# immediately.
+client_only_check() {
+  local line orig base segs seg rule bad=0
+  while IFS= read -r line || [ -n "$line" ]; do
+    [ -n "$line" ] || continue
+    orig="$line"
+    line="${line#./}"
+    line="${line%/}"
+    base="${line##*/}"
+    rule=0
+
+    # 1 — python source file
+    case "$base" in *.py) rule=1 ;; esac
+
+    # 2 — CPython extension module (always *cpython-*.so, never .py)
+    if [ "$rule" = 0 ]; then
+      case "$base" in *cpython-*.so) rule=2 ;; esac
+    fi
+
+    # 3 — venv layout: any segment is a venv marker dir (incl. dir entries)
+    if [ "$rule" = 0 ]; then
+      IFS=/ read -ra segs <<< "$line"
+      for seg in ${segs[@]+"${segs[@]}"}; do
+        case "$seg" in
+          site-packages|venv|.venv) rule=3; break ;;
+        esac
+      done
+    fi
+
+    # 4 — venv marker file
+    if [ "$rule" = 0 ]; then
+      case "$base" in pyvenv.cfg) rule=4 ;; esac
+    fi
+
+    # 5 — upstream server module directory
+    if [ "$rule" = 0 ]; then
+      for seg in ${segs[@]+"${segs[@]}"}; do
+        case "$seg" in
+          hermes_agent|hermes_cli) rule=5; break ;;
+        esac
+      done
+    fi
+
+    # 6 — bare interpreter: whole basename is python[0-9.]* (anchored)
+    if [ "$rule" = 0 ] && [[ "$base" =~ ^python[0-9]*(\.[0-9]+)*$ ]]; then
+      rule=6
+    fi
+
+    # 7 — interpreter home: a whole segment is pythonN.N (anchored)
+    if [ "$rule" = 0 ]; then
+      for seg in ${segs[@]+"${segs[@]}"}; do
+        if [[ "$seg" =~ ^python[0-9]+\.[0-9]+$ ]]; then
+          rule=7
+          break
+        fi
+      done
+    fi
+
+    if [ "$rule" != 0 ]; then
+      printf 'REJECT %s (rule %d)\n' "$orig" "$rule" >&2
+      bad=1
+    fi
+  done
+  return "$bad"
+}
+
+# --check-paths must be handled BEFORE the TAG/PLATFORM parse below, or the
+# flag would flow into `git checkout --detach`. It never touches the network,
+# the work dir, or dpkg-deb, so it runs natively on darwin.
+if [ "${1:-}" = "--check-paths" ]; then
+  client_only_check || exit $?
+  exit 0
+fi
 
 TAG="${1:-}"
 PLATFORM="${2:-}"
@@ -131,7 +237,9 @@ done
 if [ "$PLATFORM" = linux ]; then
   DEB=$(ls "$OUT"/*.deb | head -1)
   FILES=$(dpkg-deb -c "$DEB" | awk '{print $6}')
-  if grep -qiE 'python|site-packages|hermes_cli|hermes_agent|uvicorn' <<<"$FILES"; then
+  # The classifier prints one REJECT <path> (rule <N>) line per match;
+  # the summary below follows if any path failed.
+  if ! client_only_check <<<"$FILES"; then
     echo "ERROR: server components found in a client-only package" >&2
     exit 1
   fi
