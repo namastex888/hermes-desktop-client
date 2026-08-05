@@ -1,0 +1,41 @@
+# Gate match evidence — daily release pipeline repair (2026-08-05)
+
+## Offending path (verified against upstream tree at v2026.8.3)
+
+Build-tree form (in the upstream checkout):
+    .work/src/apps/desktop/dist/assets/python-B5eWn6H5.js
+
+Installed-tree form (as it appears in the shipped .deb via `dpkg-deb -c`):
+    ./opt/Hermes/resources/app.asar.unpacked/dist/assets/python-B5eWn6H5.js
+
+## Classification
+
+FALSE POSITIVE — the gate matched the bare substring `python` against a
+JavaScript syntax-highlighting chunk.
+
+The file is a CodeMirror keyword table for the Python *language mode*
+(and/or/not/is, def/class/lambda/yield, builtins abs/all/any/bin/bool/...).
+It is a syntax mode, not a runtime. It contains no Python interpreter, no
+bytecode, and no Python code — only a JS object literal mapping Python
+keywords to token classes.
+
+## Reason the gate fired
+
+The old gate at build.sh:131 ran an UNANCHORED substring grep:
+    grep -qiE 'python|site-packages|hermes_cli|hermes_agent|uvicorn'
+against the path listing. `python-B5eWn6H5.js` contains the substring
+`python`, so the whole gate fired and the build aborted.
+
+## Evidence that it is not a runtime
+
+`find dist -type f \( -name '*.py' -o -name '*cpython*' -o -name 'pyvenv.cfg' \)`
+returns NOTHING against the v2026.8.3 tree: there is no Python payload in the
+package. The chunk is 6.1K of CodeMirror keyword-table data loaded lazily by
+the editor when the user opens a .py file.
+
+## Why the fix is a classifier change, not a pattern tweak
+
+asarUnpack is byte-identical at v2026.7.20 and v2026.8.3, so the exposure
+path is old; only the chunk is new. Every language mode upstream lazily
+loads (ruby-*.js, perl-*.js, ...) collides with the same unanchored
+substring gate. A per-name exception list would need a new entry per mode.

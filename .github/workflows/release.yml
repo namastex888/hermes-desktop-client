@@ -92,8 +92,30 @@ jobs:
           path: dist/*
           if-no-files-found: error
 
+  # Independent, content-based check of the Linux payload before anything
+  # can publish. Deliberately separate from build.sh's path classifier:
+  # this inspects the extracted tree (ELF-ness is only evaluable there).
+  # Skips when resolve says the release already exists (needed=false).
+  verify:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: installers-linux
+          path: installers-linux
+
+      - name: Verify client-only payload
+        shell: bash
+        run: |
+          DEB=$(ls installers-linux/*.deb | head -1)
+          T=$(mktemp -d)
+          dpkg-deb -x "$DEB" "$T"
+          .github/scripts/verify-client-only.sh "$T"
+
   publish:
-    needs: [resolve, build]
+    needs: [resolve, build, verify]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
