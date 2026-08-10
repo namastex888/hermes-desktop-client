@@ -137,7 +137,9 @@ PLATFORM="${2:-}"
 if [ -z "$TAG" ]; then
   TAG=$(gh api repos/NousResearch/hermes-agent/releases/latest --jq .tag_name)
 fi
-VER="${TAG#v}"          # version mirrors the upstream release tag
+# Version mirrors the upstream release tag. Nightly builds check out a bare
+# commit whose sha is no version — the workflow supplies a date-based one.
+VER="${VER_OVERRIDE:-${TAG#v}}"
 
 if [ -z "$PLATFORM" ]; then
   case "$(uname -s)" in
