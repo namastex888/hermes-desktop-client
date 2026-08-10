@@ -1,0 +1,109 @@
+name: nightly
+
+# Daily fresh build of upstream `main`, published to a rolling `nightly`
+# pre-release. Complements build-and-publish (which mirrors upstream *tags*,
+# cut every week or two): this channel moves every day upstream does.
+#
+# The stable channel is untouched — a pre-release never becomes
+# releases/latest, so install.sh keeps resolving the newest tagged release.
+#
+# macOS dmg only for now (both arches). Extend the matrix if a nightly
+# deb/exe is ever wanted.
+on:
+  schedule:
+    - cron: "30 6 * * *"
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "Rebuild even if upstream main has not moved"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency: nightly
+
+jobs:
+  resolve:
+    runs-on: ubuntu-latest
+    outputs:
+      sha: ${{ steps.v.outputs.sha }}
+      ver: ${{ steps.v.outputs.ver }}
+      needed: ${{ steps.v.outputs.needed }}
+    steps:
+      - id: v
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          SHA=$(gh api repos/NousResearch/hermes-agent/commits/main --jq .sha)
+          VER="$(date -u +%Y.%-m.%-d)-nightly"
+          # The previously built sha lives as a machine-readable line in the
+          # nightly release body; absent release (first run) -> empty -> build.
+          LAST=$(gh release view nightly --repo "$REPO" --json body --jq .body 2>/dev/null \
+                   | sed -n 's/.*upstream-sha: \([0-9a-f]*\).*/\1/p' || true)
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+          echo "ver=$VER" >> "$GITHUB_OUTPUT"
+          if [ "$SHA" != "$LAST" ] || [ "${{ inputs.force }}" = "true" ]; then
+            echo "needed=true"  >> "$GITHUB_OUTPUT"
+          else
+            echo "upstream main unchanged at $SHA — nothing to build"
+            echo "needed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    needs: resolve
+    if: needs.resolve.outputs.needed == 'true'
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Build
+        shell: bash
+        env:
+          VER_OVERRIDE: ${{ needs.resolve.outputs.ver }}
+        run: ./build.sh "${{ needs.resolve.outputs.sha }}" mac
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nightly-mac
+          path: dist/*
+          if-no-files-found: error
+
+  publish:
+    needs: [resolve, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Publish rolling nightly release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ needs.resolve.outputs.sha }}
+          VER: ${{ needs.resolve.outputs.ver }}
+        run: |
+          ls -la dist
+          TITLE="hermes-desktop nightly ($VER)"
+          NOTES="Fresh client-only build of upstream \`main\` at [NousResearch/hermes-agent@${SHA:0:7}](https://github.com/NousResearch/hermes-agent/commit/$SHA), rebuilt every day upstream moves.
+
+          macOS \`.dmg\` only, unsigned (see the README). For the stable channel use the [latest tagged release](https://github.com/$REPO/releases/latest).
+
+          upstream-sha: $SHA"
+          if gh release view nightly --repo "$REPO" >/dev/null 2>&1; then
+            # Rolling release: yesterday's assets out, today's in.
+            gh release view nightly --repo "$REPO" --json assets --jq '.assets[].name' \
+              | while read -r a; do gh release delete-asset nightly "$a" --repo "$REPO" -y; done
+            gh release upload nightly dist/* --repo "$REPO"
+            gh release edit nightly --repo "$REPO" --prerelease --title "$TITLE" --notes "$NOTES"
+          else
+            gh release create nightly dist/* --repo "$REPO" --prerelease \
+              --title "$TITLE" --notes "$NOTES"
+          fi

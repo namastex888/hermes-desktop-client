@@ -39,6 +39,13 @@ irm https://raw.githubusercontent.com/namastex888/hermes-desktop-client/main/ins
 
 Then point it at a backend: **Settings → Gateway → Remote connection**.
 
+### Nightly
+
+A rolling [`nightly` pre-release](https://github.com/namastex888/hermes-desktop-client/releases/tag/nightly)
+tracks upstream `main` and is rebuilt every day upstream moves — currently the
+macOS `.dmg`, both architectures. The install commands above always resolve
+the latest *tagged* release; grab the nightly dmg from its release page.
+
 Architectures: Linux and Windows are **x86_64**; macOS ships both **Apple
 Silicon and Intel**. The installers match your machine's architecture and stop
 with a clear message rather than fetching the wrong one.
