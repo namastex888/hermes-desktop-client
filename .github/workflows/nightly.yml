@@ -96,6 +96,18 @@ jobs:
 
           macOS \`.dmg\` only, unsigned (see the README). For the stable channel use the [latest tagged release](https://github.com/$REPO/releases/latest).
 
+          **Install** (handles the Gatekeeper quarantine flag for you):
+
+          \`\`\`sh
+          curl -fsSL https://raw.githubusercontent.com/$REPO/main/install.sh | sh -s -- --nightly
+          \`\`\`
+
+          If you download the dmg by hand instead, macOS will claim the app is *damaged* — that is the quarantine flag on an unsigned build, not corruption. Clear it after copying to /Applications:
+
+          \`\`\`sh
+          xattr -dr com.apple.quarantine /Applications/Hermes.app
+          \`\`\`
+
           upstream-sha: $SHA"
           if gh release view nightly --repo "$REPO" >/dev/null 2>&1; then
             # Rolling release: yesterday's assets out, today's in.

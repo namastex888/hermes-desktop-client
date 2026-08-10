@@ -3,6 +3,10 @@
 #
 #   curl -fsSL https://raw.githubusercontent.com/namastex888/hermes-desktop-client/main/install.sh | sh
 #
+# Nightly channel (rolling build of upstream main, macOS dmg only):
+#
+#   curl -fsSL https://raw.githubusercontent.com/namastex888/hermes-desktop-client/main/install.sh | sh -s -- --nightly
+#
 # Linux (dpkg) -> .deb into /opt/Hermes
 # Linux (other) -> AppImage into ~/.local/bin
 # macOS        -> .dmg into /Applications
@@ -10,7 +14,15 @@
 set -eu
 
 REPO=namastex888/hermes-desktop-client
-API="https://api.github.com/repos/$REPO/releases/latest"
+# Pre-releases never appear at /releases/latest, so the nightly channel is
+# addressed by its rolling tag.
+CHANNEL=latest
+[ "${1:-}" = "--nightly" ] && CHANNEL=nightly
+if [ "$CHANNEL" = nightly ]; then
+  API="https://api.github.com/repos/$REPO/releases/tags/nightly"
+else
+  API="https://api.github.com/repos/$REPO/releases/latest"
+fi
 
 say()  { printf '==> %s\n' "$*"; }
 fail() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
@@ -18,7 +30,7 @@ fail() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 command -v curl >/dev/null 2>&1 || fail "curl is required"
 
 # --------------------------------------------------------------- release ----
-say "resolving latest release"
+say "resolving $CHANNEL release"
 JSON=$(curl -fsSL "$API") || fail "could not reach GitHub"
 # Pull asset download URLs without requiring jq.
 asset_url() {
