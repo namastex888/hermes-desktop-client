@@ -159,6 +159,17 @@ case "$PLATFORM" in
   *) echo "ERROR: unknown platform '$PLATFORM'" >&2; exit 1 ;;
 esac
 
+# ------------------------------------------------------------------ sign ----
+# electron-builder signs the mac build by itself when CSC_LINK/CSC_KEY_PASSWORD
+# are in the environment, and notarizes when told to (APPLE_ID,
+# APPLE_APP_SPECIFIC_PASSWORD, APPLE_TEAM_ID). All five are CI secrets — on
+# forks and local builds they are absent and the dmg stays unsigned as before.
+MAC_SIGN=()
+if [ "$PLATFORM" = mac ] && [ -n "${APPLE_ID:-}" ]; then
+  MAC_SIGN=(-c.mac.notarize=true -c.mac.hardenedRuntime=true)
+  echo "==> mac signing + notarization enabled"
+fi
+
 echo "==> upstream $TAG -> $PKG $VER ($PLATFORM)"
 
 # ---------------------------------------------------------------- source ----
@@ -216,7 +227,8 @@ npm run build
 # We ship no updater — apt / re-running install.sh is the update path — so the
 # config exists only to satisfy the packager.
 # ${a[@]+"${a[@]}"} — bash 3.2 (macOS) errors on an empty array under set -u.
-npm run builder -- "${TARGETS[@]}" ${ICON_FLAGS[@]+"${ICON_FLAGS[@]}"} --publish never \
+npm run builder -- "${TARGETS[@]}" ${ICON_FLAGS[@]+"${ICON_FLAGS[@]}"} \
+  ${MAC_SIGN[@]+"${MAC_SIGN[@]}"} --publish never \
   -c.extraMetadata.name="$PKG" \
   -c.extraMetadata.version="$VER" \
   -c.extraMetadata.homepage="$UPSTREAM_WEB" \

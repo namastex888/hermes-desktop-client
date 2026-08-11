@@ -60,11 +60,12 @@ with a clear message rather than fetching the wrong one.
 
 ### Signing
 
-Linux packages need no signing. The **macOS and Windows builds are unsigned** —
-notarisation needs a paid Apple Developer account and an Authenticode
-certificate. On macOS the installer strips the quarantine bit for you; on
-Windows, SmartScreen may warn ("More info" → "Run anyway"). If that is not
-acceptable, build locally with `./build.sh`.
+Linux packages need no signing. The **macOS build is signed and notarized** in
+CI when the signing secrets (`CSC_LINK`, `CSC_KEY_PASSWORD`, `APPLE_ID`,
+`APPLE_APP_SPECIFIC_PASSWORD`, `APPLE_TEAM_ID`) are configured; without them —
+forks, local builds — it falls back to unsigned, and the installer strips the
+quarantine bit for you. The **Windows build is unsigned** (no Authenticode
+certificate); SmartScreen may warn ("More info" → "Run anyway").
 
 ## Why upstream has no .deb
 
