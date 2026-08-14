@@ -185,7 +185,10 @@ git -C "$SRC" clean -xdf -e node_modules -e apps/desktop/node_modules
 ( cd "$SRC" && npm ci --no-audit --no-fund )
 
 # MIT requires the licence + copyright notice to ship with binaries. Upstream's
-# packaging bundles only the Electron/Chromium licences, so add theirs.
+# packaging bundles only the Electron/Chromium licences, so add theirs. Shipped
+# via extraResources (Contents/Resources on mac), NOT extraFiles: extraFiles
+# lands at the Contents/ root, where codesign rejects it as an unsigned
+# subcomponent and the signed nightly build fails.
 cp "$SRC/LICENSE" "$SRC/apps/desktop/LICENSE"
 
 # ------------------------------------------------------------------ icons ----
@@ -233,7 +236,7 @@ npm run builder -- "${TARGETS[@]}" ${ICON_FLAGS[@]+"${ICON_FLAGS[@]}"} \
   -c.extraMetadata.version="$VER" \
   -c.extraMetadata.homepage="$UPSTREAM_WEB" \
   -c.extraMetadata.repository="$SELF_WEB" \
-  -c.extraFiles=LICENSE
+  -c.extraResources=LICENSE
 
 # --------------------------------------------------------------- collect ----
 shopt -s nullglob
