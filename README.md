@@ -44,7 +44,15 @@ Then point it at a backend: **Settings → Gateway → Remote connection**.
 A rolling [`nightly` pre-release](https://github.com/namastex888/hermes-desktop-client/releases/tag/nightly)
 tracks upstream `main` and is rebuilt every day upstream moves — currently the
 macOS `.dmg`, both architectures. The install commands above always resolve
-the latest *tagged* release; grab the nightly dmg from its release page.
+the latest *tagged* release; for the nightly:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/namastex888/hermes-desktop-client/main/install.sh | sh -s -- --nightly
+```
+
+If you download the dmg by hand instead, macOS reports the unsigned app as
+"damaged" — that is the quarantine flag, not corruption. Clear it with
+`xattr -dr com.apple.quarantine /Applications/Hermes.app`.
 
 Architectures: Linux and Windows are **x86_64**; macOS ships both **Apple
 Silicon and Intel**. The installers match your machine's architecture and stop
@@ -52,11 +60,12 @@ with a clear message rather than fetching the wrong one.
 
 ### Signing
 
-Linux packages need no signing. The **macOS and Windows builds are unsigned** —
-notarisation needs a paid Apple Developer account and an Authenticode
-certificate. On macOS the installer strips the quarantine bit for you; on
-Windows, SmartScreen may warn ("More info" → "Run anyway"). If that is not
-acceptable, build locally with `./build.sh`.
+Linux packages need no signing. The **macOS build is signed and notarized** in
+CI when the signing secrets (`CSC_LINK`, `CSC_KEY_PASSWORD`, `APPLE_ID`,
+`APPLE_APP_SPECIFIC_PASSWORD`, `APPLE_TEAM_ID`) are configured; without them —
+forks, local builds — it falls back to unsigned, and the installer strips the
+quarantine bit for you. The **Windows build is unsigned** (no Authenticode
+certificate); SmartScreen may warn ("More info" → "Run anyway").
 
 ## Why upstream has no .deb
 

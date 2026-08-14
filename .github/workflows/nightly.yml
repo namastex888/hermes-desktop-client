@@ -66,6 +66,12 @@ jobs:
         shell: bash
         env:
           VER_OVERRIDE: ${{ needs.resolve.outputs.ver }}
+          # Signing + notarization; absent secrets leave the build unsigned.
+          CSC_LINK: ${{ secrets.CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: ./build.sh "${{ needs.resolve.outputs.sha }}" mac
 
       - uses: actions/upload-artifact@v4
@@ -95,6 +101,18 @@ jobs:
           NOTES="Fresh client-only build of upstream \`main\` at [NousResearch/hermes-agent@${SHA:0:7}](https://github.com/NousResearch/hermes-agent/commit/$SHA), rebuilt every day upstream moves.
 
           macOS \`.dmg\` only, unsigned (see the README). For the stable channel use the [latest tagged release](https://github.com/$REPO/releases/latest).
+
+          **Install** (handles the Gatekeeper quarantine flag for you):
+
+          \`\`\`sh
+          curl -fsSL https://raw.githubusercontent.com/$REPO/main/install.sh | sh -s -- --nightly
+          \`\`\`
+
+          If you download the dmg by hand instead, macOS will claim the app is *damaged* — that is the quarantine flag on an unsigned build, not corruption. Clear it after copying to /Applications:
+
+          \`\`\`sh
+          xattr -dr com.apple.quarantine /Applications/Hermes.app
+          \`\`\`
 
           upstream-sha: $SHA"
           if gh release view nightly --repo "$REPO" >/dev/null 2>&1; then

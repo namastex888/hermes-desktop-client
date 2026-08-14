@@ -84,6 +84,14 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
+          # Mac-only signing + notarization; empty on other platforms so the
+          # p12 is never offered to the Windows codesigner. Absent secrets
+          # leave the build unsigned.
+          CSC_LINK: ${{ matrix.platform == 'mac' && secrets.CSC_LINK || '' }}
+          CSC_KEY_PASSWORD: ${{ matrix.platform == 'mac' && secrets.CSC_KEY_PASSWORD || '' }}
+          APPLE_ID: ${{ matrix.platform == 'mac' && secrets.APPLE_ID || '' }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ matrix.platform == 'mac' && secrets.APPLE_APP_SPECIFIC_PASSWORD || '' }}
+          APPLE_TEAM_ID: ${{ matrix.platform == 'mac' && secrets.APPLE_TEAM_ID || '' }}
         run: ./build.sh "${{ needs.resolve.outputs.tag }}" "${{ matrix.platform }}"
 
       - uses: actions/upload-artifact@v4
