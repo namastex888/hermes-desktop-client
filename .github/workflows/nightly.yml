@@ -66,6 +66,7 @@ jobs:
         shell: bash
         env:
           VER_OVERRIDE: ${{ needs.resolve.outputs.ver }}
+          GH_TOKEN: ${{ github.token }}
           # Signing + notarization; absent secrets leave the build unsigned.
           CSC_LINK: ${{ secrets.CSC_LINK }}
           CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}

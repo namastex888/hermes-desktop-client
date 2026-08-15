@@ -21,7 +21,7 @@
 #   runs natively on any machine with bash.
 set -euo pipefail
 
-UPSTREAM_GIT=https://github.com/NousResearch/hermes-agent.git
+UPSTREAM_GIT="https://${GH_TOKEN:+x-access-token:${GH_TOKEN}@}github.com/NousResearch/hermes-agent.git"
 UPSTREAM_WEB=https://github.com/NousResearch/hermes-agent
 SELF_WEB=https://github.com/namastex888/hermes-desktop-client
 PKG=hermes-desktop
