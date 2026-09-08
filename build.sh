@@ -172,6 +172,74 @@ if [ "$PLATFORM" = mac ] && [ -n "${APPLE_ID:-}" ]; then
   echo "==> mac signing + notarization enabled"
 fi
 
+# setup_keychain — import the signing cert ourselves, before electron-builder.
+#
+# electron-builder's own p12 import dies on its last step:
+#
+#   /usr/bin/security set-key-partition-list -S apple-tool:,apple: -s -k ***
+#     <tmp>/a31cc02c...keychain
+#   security: SecKeychainUnlock: The user name or passphrase you entered is
+#   not correct.
+#
+# The password is fine. That keychain path is a hash of the certificate, so it
+# is the SAME file on every run; electron-builder creates it with a fresh
+# random password each time but does not delete a pre-existing one, so once a
+# stale keychain is present the new password no longer opens it and every
+# subsequent signed build fails. The cert had already been imported by then —
+# which is why the unsigned fallback still produced a signed app, having
+# auto-discovered the identity that the "failed" import left behind.
+#
+# So do the import in a keychain we name, create and unlock ourselves. With
+# CSC_LINK then unset, electron-builder skips its own import and finds the
+# identity by auto-discovery over the search list, and -c.mac.notarize survives
+# — which the unsigned fallback drops, shipping a signed but un-notarized dmg.
+KEYCHAIN=hermes-build.keychain
+setup_keychain() {
+  local kcpw p12="$WORK/cert.p12"
+  kcpw="$(openssl rand -hex 16)"
+
+  # CSC_LINK is base64-encoded p12 in CI; electron-builder also accepts a path.
+  if [ -f "$CSC_LINK" ]; then
+    cp "$CSC_LINK" "$p12"
+  else
+    printf '%s' "$CSC_LINK" | base64 --decode > "$p12"
+  fi
+
+  # Left over from an earlier run on a warm runner — the whole bug above.
+  security delete-keychain "$KEYCHAIN" 2>/dev/null || true
+
+  security create-keychain -p "$kcpw" "$KEYCHAIN"
+  # -lut: no auto-lock mid-notarization (the wait can run long).
+  security set-keychain-settings -lut 21600 "$KEYCHAIN"
+  security unlock-keychain -p "$kcpw" "$KEYCHAIN"
+  security import "$p12" -k "$KEYCHAIN" -P "$CSC_KEY_PASSWORD" \
+    -T /usr/bin/codesign -T /usr/bin/security -T /usr/bin/productbuild
+  # Keep the login keychain in the search list; codesign needs the Apple
+  # intermediate certificates that live there.
+  security list-keychains -d user -s "$KEYCHAIN" login.keychain-db
+  # Authorise codesign to use the key without an interactive prompt. This is
+  # the call that fails inside electron-builder; here the password is one we
+  # just set on a keychain we just created, so it opens.
+  security set-key-partition-list -S apple-tool:,apple:,codesign: \
+    -s -k "$kcpw" "$KEYCHAIN" >/dev/null
+  rm -f "$p12"
+
+  security find-identity -v -p codesigning "$KEYCHAIN" | grep -q "Developer ID Application"
+}
+
+if [ "$SIGNED" = 1 ] && [ -n "${CSC_LINK:-}" ]; then
+  mkdir -p "$WORK"
+  if setup_keychain; then
+    echo "==> signing identity imported into $KEYCHAIN"
+    export CSC_KEYCHAIN="$KEYCHAIN"
+    unset CSC_LINK CSC_KEY_PASSWORD
+  else
+    # Not fatal: leave CSC_LINK in place and let electron-builder try its own
+    # import, with the retry/unsigned fallback below as the last line of defence.
+    echo "==> WARNING: could not import the signing cert; leaving it to electron-builder" >&2
+  fi
+fi
+
 echo "==> upstream $TAG -> $PKG $VER ($PLATFORM)"
 
 # ---------------------------------------------------------------- source ----
@@ -183,32 +251,54 @@ mkdir -p "$WORK" "$OUT"
 # raised the ceiling but did not remove it — the token is scoped to THIS repo,
 # so cloning upstream still counts against the shared anonymous budget.
 #
-# 429 is a wait-and-retry signal, not an error, so treat it as one. Backoff is
-# exponential; a partial clone is deleted first, since git refuses to clone
-# into a non-empty directory and would turn a transient throttle into a
-# permanent failure on the retry.
+# 429 is a wait-and-retry signal, not an error, so treat it as one — but the
+# throttling was self-inflicted. This used to clone with --filter=blob:none,
+# which downloads no file contents up front and then fetches them lazily from
+# the promisor remote as `git checkout` touches them: thousands of small
+# requests for one checkout, which is exactly the traffic shape a rate limiter
+# exists to stop. The tell was the last error of a failing run —
+#
+#   fatal: could not fetch 354ff6b... from promisor remote
+#   warning: Clone succeeded, but checkout failed.
+#
+# — a checkout dying on a fetch, long after the clone reported success.
+#
+# A --depth 1 fetch of the one ref we build takes a single request and carries
+# its blobs with it. Nothing lazy is left to fetch, so the checkout is local,
+# and it is faster besides. Retries remain, with exponential backoff, for the
+# throttling we cannot avoid. GitHub periodically applies anti-scraping limits
+# to the upstream repo itself: while one is in force, `git clone` AND the
+# source tarball both return 429 ("This request was rate-limited due to too
+# many requests") for everyone, authenticated or not — reproducible from a
+# laptop with a personal token, so it is not a runner-IP or token-scope
+# problem and no credential change fixes it. It clears within minutes, which
+# is what the backoff is for.
 fetch_source() {
-  local attempt=1 max=5 delay=20
+  local attempt=1 max=8 delay=20
+  mkdir -p "$SRC"
+  git -C "$SRC" rev-parse --git-dir >/dev/null 2>&1 || git init -q "$SRC"
+  git -C "$SRC" remote remove origin 2>/dev/null || true
+  git -C "$SRC" remote add origin "$UPSTREAM_GIT"
   while true; do
-    if [ -d "$SRC/.git" ]; then
-      git -C "$SRC" fetch --tags --force origin && return 0
-    else
-      rm -rf "$SRC"
-      git clone --filter=blob:none "$UPSTREAM_GIT" "$SRC" \
-        && git -C "$SRC" fetch --tags --force origin && return 0
+    # One request, blobs included. $TAG is a tag for the release channel and a
+    # bare sha for nightly; github.com serves both (allowReachableSHA1InWant).
+    if git -C "$SRC" fetch --depth 1 --force origin "$TAG" \
+       && git -C "$SRC" checkout --detach FETCH_HEAD; then
+      return 0
     fi
     if [ "$attempt" -ge "$max" ]; then
-      echo "ERROR: could not fetch upstream after $max attempts" >&2
+      echo "ERROR: could not fetch upstream $TAG after $max attempts" >&2
       return 1
     fi
     echo "==> upstream fetch failed (attempt $attempt/$max) — retrying in ${delay}s" >&2
     sleep "$delay"
-    delay=$((delay * 2))
+    # Cap the backoff: the throttle lifts on its own within minutes, so a
+    # doubling delay would end up waiting far longer than the block lasts.
+    [ "$delay" -ge 300 ] || delay=$((delay * 2))
     attempt=$((attempt + 1))
   done
 }
 fetch_source
-git -C "$SRC" checkout --detach "$TAG"
 git -C "$SRC" clean -xdf -e node_modules -e apps/desktop/node_modules
 
 # ------------------------------------------------------------------ deps ----
