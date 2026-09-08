@@ -165,8 +165,10 @@ esac
 # APPLE_APP_SPECIFIC_PASSWORD, APPLE_TEAM_ID). All five are CI secrets — on
 # forks and local builds they are absent and the dmg stays unsigned as before.
 MAC_SIGN=()
+SIGNED=0
 if [ "$PLATFORM" = mac ] && [ -n "${APPLE_ID:-}" ]; then
   MAC_SIGN=(-c.mac.notarize=true -c.mac.hardenedRuntime=true)
+  SIGNED=1
   echo "==> mac signing + notarization enabled"
 fi
 
@@ -230,13 +232,56 @@ npm run build
 # We ship no updater — apt / re-running install.sh is the update path — so the
 # config exists only to satisfy the packager.
 # ${a[@]+"${a[@]}"} — bash 3.2 (macOS) errors on an empty array under set -u.
-npm run builder -- "${TARGETS[@]}" ${ICON_FLAGS[@]+"${ICON_FLAGS[@]}"} \
-  ${MAC_SIGN[@]+"${MAC_SIGN[@]}"} --publish never \
-  -c.extraMetadata.name="$PKG" \
-  -c.extraMetadata.version="$VER" \
-  -c.extraMetadata.homepage="$UPSTREAM_WEB" \
-  -c.extraMetadata.repository="$SELF_WEB" \
-  -c.extraResources=LICENSE
+run_builder() {
+  npm run builder -- "${TARGETS[@]}" ${ICON_FLAGS[@]+"${ICON_FLAGS[@]}"} \
+    ${MAC_SIGN[@]+"${MAC_SIGN[@]}"} --publish never \
+    -c.extraMetadata.name="$PKG" \
+    -c.extraMetadata.version="$VER" \
+    -c.extraMetadata.homepage="$UPSTREAM_WEB" \
+    -c.extraMetadata.repository="$SELF_WEB" \
+    -c.extraResources=LICENSE
+}
+
+# electron-builder imports the p12 into a throwaway keychain, and that import
+# fails intermittently on the macOS runners:
+#
+#   security: SecKeychainUnlock: The user name or passphrase you entered is
+#   not correct.  (/usr/bin/security set-key-partition-list ... failed 1)
+#
+# The credentials are fine — the same secrets sign and notarize successfully
+# on the very next run. It is a race in the keychain setup, not a bad password,
+# so the cure is to try again rather than to go digging in the secrets.
+#
+# Retry the whole packaging step, then, if every signed attempt lost the race,
+# fall back to an unsigned build. A stalled release channel is worse than an
+# unsigned dmg: unsigned is what this repo shipped before signing existed, it
+# is what the release notes already promise, and install.sh clears the
+# quarantine flag for it. The fallback is loud so a genuinely broken
+# certificate still shows up in the log instead of silently downgrading.
+BUILD_ATTEMPTS="${BUILD_ATTEMPTS:-3}"
+attempt=1
+while true; do
+  if run_builder; then
+    break
+  fi
+  if [ "$attempt" -lt "$BUILD_ATTEMPTS" ]; then
+    echo "==> build attempt $attempt/$BUILD_ATTEMPTS failed — retrying in 15s" >&2
+    sleep 15
+    attempt=$((attempt + 1))
+    continue
+  fi
+  if [ "$SIGNED" = 1 ]; then
+    echo "==> WARNING: $BUILD_ATTEMPTS signed builds failed; retrying UNSIGNED" >&2
+    echo "==> WARNING: the published dmg will not be signed or notarized" >&2
+    MAC_SIGN=()
+    SIGNED=0
+    unset CSC_LINK CSC_KEY_PASSWORD APPLE_ID APPLE_APP_SPECIFIC_PASSWORD APPLE_TEAM_ID
+    run_builder
+    break
+  fi
+  echo "ERROR: build failed after $BUILD_ATTEMPTS attempts" >&2
+  exit 1
+done
 
 # --------------------------------------------------------------- collect ----
 shopt -s nullglob
