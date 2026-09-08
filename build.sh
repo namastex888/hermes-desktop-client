@@ -275,8 +275,14 @@ mkdir -p "$WORK" "$OUT"
 # is what the backoff is for.
 fetch_source() {
   local attempt=1 max=8 delay=20
+  # Test for $SRC/.git directly, NOT `git -C "$SRC" rev-parse --git-dir`:
+  # $SRC lives at .work/src, inside this repo's own checkout, so rev-parse
+  # walks up and happily reports the OUTER repository. Trusting it skips the
+  # init and points every command below — remote, fetch, checkout — at
+  # hermes-desktop-client itself, which checks upstream's tree out over the
+  # workspace and then fails in `git clean` with "failed to remove ./".
   mkdir -p "$SRC"
-  git -C "$SRC" rev-parse --git-dir >/dev/null 2>&1 || git init -q "$SRC"
+  [ -d "$SRC/.git" ] || git init -q "$SRC"
   git -C "$SRC" remote remove origin 2>/dev/null || true
   git -C "$SRC" remote add origin "$UPSTREAM_GIT"
   while true; do
