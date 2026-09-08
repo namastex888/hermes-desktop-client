@@ -80,6 +80,13 @@ jobs:
           name: nightly-mac
           path: dist/*
           if-no-files-found: error
+          # Purely a hand-off to the publish job; the installers that matter
+          # end up on the release. At ~275MB a build the 90-day default piled
+          # up 16GB of dead weight and the account hit its storage quota,
+          # which surfaces as an opaque upload failure with the build itself
+          # green:
+          #   Failed to FinalizeArtifact: ... (403) Forbidden
+          retention-days: 1
 
   publish:
     needs: [resolve, build]
