@@ -176,10 +176,38 @@ echo "==> upstream $TAG -> $PKG $VER ($PLATFORM)"
 
 # ---------------------------------------------------------------- source ----
 mkdir -p "$WORK" "$OUT"
-if [ ! -d "$SRC/.git" ]; then
-  git clone --filter=blob:none "$UPSTREAM_GIT" "$SRC"
-fi
-git -C "$SRC" fetch --tags --force origin
+
+# The macOS runners share a small pool of egress IPs and GitHub throttles them
+# hard: `error: RPC failed; HTTP 429` mid-clone, killing the build at exit 128
+# before a single file is packaged. Authenticating the clone (see git history)
+# raised the ceiling but did not remove it — the token is scoped to THIS repo,
+# so cloning upstream still counts against the shared anonymous budget.
+#
+# 429 is a wait-and-retry signal, not an error, so treat it as one. Backoff is
+# exponential; a partial clone is deleted first, since git refuses to clone
+# into a non-empty directory and would turn a transient throttle into a
+# permanent failure on the retry.
+fetch_source() {
+  local attempt=1 max=5 delay=20
+  while true; do
+    if [ -d "$SRC/.git" ]; then
+      git -C "$SRC" fetch --tags --force origin && return 0
+    else
+      rm -rf "$SRC"
+      git clone --filter=blob:none "$UPSTREAM_GIT" "$SRC" \
+        && git -C "$SRC" fetch --tags --force origin && return 0
+    fi
+    if [ "$attempt" -ge "$max" ]; then
+      echo "ERROR: could not fetch upstream after $max attempts" >&2
+      return 1
+    fi
+    echo "==> upstream fetch failed (attempt $attempt/$max) — retrying in ${delay}s" >&2
+    sleep "$delay"
+    delay=$((delay * 2))
+    attempt=$((attempt + 1))
+  done
+}
+fetch_source
 git -C "$SRC" checkout --detach "$TAG"
 git -C "$SRC" clean -xdf -e node_modules -e apps/desktop/node_modules
 
