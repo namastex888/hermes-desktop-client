@@ -2,13 +2,11 @@ name: nightly
 
 # Daily fresh build of upstream `main`, published to a rolling `nightly`
 # pre-release. Complements build-and-publish (which mirrors upstream *tags*,
-# cut every week or two): this channel moves every day upstream does.
+# cut every week or two): this channel moves every day upstream does, and
+# upstream `main` currently runs thousands of commits ahead of the newest tag.
 #
 # The stable channel is untouched — a pre-release never becomes
 # releases/latest, so install.sh keeps resolving the newest tagged release.
-#
-# macOS dmg only for now (both arches). Extend the matrix if a nightly
-# deb/exe is ever wanted.
 on:
   schedule:
     - cron: "30 6 * * *"
@@ -21,6 +19,10 @@ on:
 
 permissions:
   contents: write
+  # Sigstore build provenance: id-token mints the OIDC token that binds the
+  # attestation to THIS workflow, attestations stores the resulting bundle.
+  id-token: write
+  attestations: write
 
 concurrency: nightly
 
@@ -55,29 +57,44 @@ jobs:
   build:
     needs: resolve
     if: needs.resolve.outputs.needed == 'true'
-    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            platform: mac
+          - os: ubuntu-latest
+            platform: linux
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 22
 
+      # Needed to generate the hicolor icon set (upstream ships only 1024x1024).
+      - name: Icon tooling
+        if: matrix.platform == 'linux'
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends python3-pil
+
       - name: Build
         shell: bash
         env:
           VER_OVERRIDE: ${{ needs.resolve.outputs.ver }}
           GH_TOKEN: ${{ github.token }}
-          # Signing + notarization; absent secrets leave the build unsigned.
-          CSC_LINK: ${{ secrets.CSC_LINK }}
-          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-        run: ./build.sh "${{ needs.resolve.outputs.sha }}" mac
+          # Mac-only signing + notarization; empty elsewhere. Absent secrets
+          # leave the build unsigned — and build.sh then FAILS rather than
+          # publishing an artifact the release notes call notarized.
+          CSC_LINK: ${{ matrix.platform == 'mac' && secrets.CSC_LINK || '' }}
+          CSC_KEY_PASSWORD: ${{ matrix.platform == 'mac' && secrets.CSC_KEY_PASSWORD || '' }}
+          APPLE_ID: ${{ matrix.platform == 'mac' && secrets.APPLE_ID || '' }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ matrix.platform == 'mac' && secrets.APPLE_APP_SPECIFIC_PASSWORD || '' }}
+          APPLE_TEAM_ID: ${{ matrix.platform == 'mac' && secrets.APPLE_TEAM_ID || '' }}
+        run: ./build.sh "${{ needs.resolve.outputs.sha }}" "${{ matrix.platform }}"
 
       - uses: actions/upload-artifact@v4
         with:
-          name: nightly-mac
+          name: nightly-${{ matrix.platform }}
           path: dist/*
           if-no-files-found: error
           # Purely a hand-off to the publish job; the installers that matter
@@ -88,14 +105,59 @@ jobs:
           #   Failed to FinalizeArtifact: ... (403) Forbidden
           retention-days: 1
 
+  # Independent, content-based check of the Linux payload before anything can
+  # publish. Deliberately separate from build.sh's path classifier: this
+  # inspects the extracted tree (ELF-ness is only evaluable there).
+  verify:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: nightly-linux
+          path: installers-linux
+      - name: Verify client-only payload
+        shell: bash
+        run: |
+          DEB=$(ls installers-linux/*.deb | head -1)
+          T=$(mktemp -d)
+          dpkg-deb -x "$DEB" "$T"
+          .github/scripts/verify-client-only.sh "$T"
+
   publish:
-    needs: [resolve, build]
+    needs: [resolve, build, verify]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
         with:
           path: dist
           merge-multiple: true
+
+      # One manifest over the merged set from every platform. Generated here
+      # rather than in build.sh because each platform build has only its own
+      # artifacts, and three same-named manifests would collide under
+      # merge-multiple.
+      - name: Checksum manifest
+        run: |
+          cd dist
+          # Explicitly exclude SHA256SUMS rather than relying on `*` being
+          # expanded before the redirection creates the file.
+          find . -maxdepth 1 -type f ! -name SHA256SUMS -printf '%P\n' \
+            | sort | xargs -r sha256sum -- > SHA256SUMS
+          cat SHA256SUMS
+
+      # Keyless Sigstore signing. The attestation binds each artifact's digest
+      # to this repository, workflow and commit, and is logged in a public
+      # transparency log. This is the Linux-side answer to notarization: there
+      # is no OS-level notary on Linux, so provenance is what a user can
+      # actually verify:
+      #   gh attestation verify Hermes-*.deb --repo ${{ github.repository }}
+      # No long-lived signing key exists to leak or rotate.
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: dist/*
 
       - name: Publish rolling nightly release
         env:
@@ -108,19 +170,25 @@ jobs:
           TITLE="hermes-desktop nightly ($VER)"
           NOTES="Fresh client-only build of upstream \`main\` at [NousResearch/hermes-agent@${SHA:0:7}](https://github.com/NousResearch/hermes-agent/commit/$SHA), rebuilt every day upstream moves.
 
-          macOS \`.dmg\` only, unsigned (see the README). For the stable channel use the [latest tagged release](https://github.com/$REPO/releases/latest).
+          No Python, no venv, no gateway — the Electron client only.
 
-          **Install** (handles the Gatekeeper quarantine flag for you):
+          **macOS** \`.dmg\` (Intel + Apple Silicon) — signed with a Developer ID, hardened runtime, **notarized by Apple and stapled**. The disk image itself carries the ticket, so Gatekeeper clears it offline: no \`xattr\` dance, no \"damaged\" dialog.
+
+          **Linux** \`.deb\` and \`.AppImage\` — no OS-level notary exists on Linux, so every artifact ships with Sigstore build provenance instead. Verify that a file really came from this repo's CI:
+
+          \`\`\`sh
+          gh attestation verify Hermes-$VER-linux-amd64.deb --repo $REPO
+          \`\`\`
+
+          \`SHA256SUMS\` covers every asset on this release.
+
+          **Install:**
 
           \`\`\`sh
           curl -fsSL https://raw.githubusercontent.com/$REPO/main/install.sh | sh -s -- --nightly
           \`\`\`
 
-          If you download the dmg by hand instead, macOS will claim the app is *damaged* — that is the quarantine flag on an unsigned build, not corruption. Clear it after copying to /Applications:
-
-          \`\`\`sh
-          xattr -dr com.apple.quarantine /Applications/Hermes.app
-          \`\`\`
+          For the stable channel use the [latest tagged release](https://github.com/$REPO/releases/latest).
 
           upstream-sha: $SHA"
           if gh release view nightly --repo "$REPO" >/dev/null 2>&1; then
