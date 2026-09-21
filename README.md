@@ -59,6 +59,27 @@ Architectures: Linux and Windows are **x86_64**; macOS ships both **Apple
 Silicon and Intel**. The installers match your machine's architecture and stop
 with a clear message rather than fetching the wrong one.
 
+### Release channels
+
+| channel | tag | built from | contents |
+| --- | --- | --- | --- |
+| stable (mirror) | `vYYYY.M.D` | the matching upstream **tag** | Linux, macOS, Windows |
+| stable (from main) | `main-YYYY.M.D` | upstream **`main`** at dispatch time | Linux, macOS, Windows |
+| nightly | `nightly` | upstream **`main`**, daily | Linux, macOS |
+
+Upstream `main` runs thousands of commits ahead of the newest tag, so a
+tag-mirror release can be months of work behind. To cut a full stable release
+from current upstream `main`:
+
+```sh
+gh workflow run release.yml -f upstream_ref=main
+```
+
+That builds all three platforms, publishes as `main-<date>` and marks it
+**Latest**, so `install.sh` resolves it by default. The `main-` prefix cannot
+collide with upstream's `vYYYY.M.D` tags, so the tag mirror keeps working
+untouched.
+
 ### Signing and notarization
 
 **macOS** — the app *and the disk image around it* are signed with a Developer

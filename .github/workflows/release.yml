@@ -11,6 +11,9 @@ on:
       tag:
         description: "Upstream tag to build (default: latest release)"
         required: false
+      upstream_ref:
+        description: "Upstream branch/sha to build instead of a tag (e.g. main). Publishes as main-<date> and marks it Latest."
+        required: false
 
 permissions:
   contents: write
@@ -23,8 +26,10 @@ jobs:
   resolve:
     runs-on: ubuntu-latest
     outputs:
-      tag: ${{ steps.v.outputs.tag }}
+      build_ref: ${{ steps.v.outputs.build_ref }}
+      rel_tag: ${{ steps.v.outputs.rel_tag }}
       ver: ${{ steps.v.outputs.ver }}
+      desc: ${{ steps.v.outputs.desc }}
       needed: ${{ steps.v.outputs.needed }}
     steps:
       - uses: actions/checkout@v4
@@ -44,20 +49,51 @@ jobs:
             git push
           fi
 
+      # Two modes. Default (and the cron) mirrors an upstream TAG. Passing
+      # upstream_ref builds a moving ref instead — normally `main`, which runs
+      # thousands of commits ahead of the newest tag, so it is the only way to
+      # ship current upstream work on the stable channel.
+      #
+      # Inputs are read through env, never interpolated into the script body:
+      # `desc` carries backticks and would otherwise be executed as command
+      # substitution the moment it is expanded.
       - id: v
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
+          REF: ${{ inputs.upstream_ref }}
+          IN_TAG: ${{ inputs.tag }}
         run: |
-          TAG="${{ inputs.tag }}"
-          [ -n "$TAG" ] || TAG=$(gh api repos/NousResearch/hermes-agent/releases/latest --jq .tag_name)
-          echo "tag=$TAG"     >> "$GITHUB_OUTPUT"
-          echo "ver=${TAG#v}" >> "$GITHUB_OUTPUT"
-          if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
-            echo "needed=false" >> "$GITHUB_OUTPUT"
+          if [ -n "$REF" ]; then
+            SHA=$(gh api "repos/NousResearch/hermes-agent/commits/$REF" --jq .sha)
+            VER="$(date -u +%Y.%-m.%-d)"
+            # The `main-` prefix cannot collide with upstream's vYYYY.M.D tags,
+            # so mirroring a real upstream tag later still works untouched.
+            REL_TAG="main-$VER"
+            BUILD_REF="$SHA"
+            NEEDED=true
+            DESC="upstream \`$REF\` at [NousResearch/hermes-agent@${SHA:0:7}](https://github.com/NousResearch/hermes-agent/commit/$SHA)"
           else
-            echo "needed=true"  >> "$GITHUB_OUTPUT"
+            TAG="$IN_TAG"
+            [ -n "$TAG" ] || TAG=$(gh api repos/NousResearch/hermes-agent/releases/latest --jq .tag_name)
+            VER="${TAG#v}"
+            REL_TAG="$TAG"
+            BUILD_REF="$TAG"
+            if gh release view "$REL_TAG" --repo "$REPO" >/dev/null 2>&1; then
+              NEEDED=false
+            else
+              NEEDED=true
+            fi
+            DESC="upstream [\`$TAG\`](https://github.com/NousResearch/hermes-agent/releases/tag/$TAG)"
           fi
+          {
+            echo "build_ref=$BUILD_REF"
+            echo "rel_tag=$REL_TAG"
+            echo "ver=$VER"
+            echo "desc=$DESC"
+            echo "needed=$NEEDED"
+          } >> "$GITHUB_OUTPUT"
+          echo "building $BUILD_REF -> release $REL_TAG (version $VER, needed=$NEEDED)"
 
   build:
     needs: resolve
@@ -87,16 +123,18 @@ jobs:
       - name: Build
         shell: bash
         env:
+          VER_OVERRIDE: ${{ needs.resolve.outputs.ver }}
           GH_TOKEN: ${{ github.token }}
           # Mac-only signing + notarization; empty on other platforms so the
           # p12 is never offered to the Windows codesigner. Absent secrets
-          # leave the build unsigned.
+          # leave the build unsigned — and build.sh then FAILS rather than
+          # publishing an artifact the release notes call notarized.
           CSC_LINK: ${{ matrix.platform == 'mac' && secrets.CSC_LINK || '' }}
           CSC_KEY_PASSWORD: ${{ matrix.platform == 'mac' && secrets.CSC_KEY_PASSWORD || '' }}
           APPLE_ID: ${{ matrix.platform == 'mac' && secrets.APPLE_ID || '' }}
           APPLE_APP_SPECIFIC_PASSWORD: ${{ matrix.platform == 'mac' && secrets.APPLE_APP_SPECIFIC_PASSWORD || '' }}
           APPLE_TEAM_ID: ${{ matrix.platform == 'mac' && secrets.APPLE_TEAM_ID || '' }}
-        run: ./build.sh "${{ needs.resolve.outputs.tag }}" "${{ matrix.platform }}"
+        run: ./build.sh "${{ needs.resolve.outputs.build_ref }}" "${{ matrix.platform }}"
 
       - uses: actions/upload-artifact@v4
         with:
@@ -171,13 +209,13 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
-          TAG: ${{ needs.resolve.outputs.tag }}
+          TAG: ${{ needs.resolve.outputs.rel_tag }}
           VER: ${{ needs.resolve.outputs.ver }}
+          DESC: ${{ needs.resolve.outputs.desc }}
         run: |
           ls -la dist
-          gh release create "$TAG" dist/* --repo "$REPO" \
-            --title "hermes-desktop $VER" \
-            --notes "Client-only build of upstream [\`$TAG\`](https://github.com/NousResearch/hermes-agent/releases/tag/$TAG).
+          TITLE="hermes-desktop $VER"
+          NOTES="Client-only build of $DESC.
 
           No Python, no venv, no gateway — the Electron client only.
 
@@ -185,7 +223,7 @@ jobs:
           curl -fsSL https://raw.githubusercontent.com/$REPO/main/install.sh | sh
           \`\`\`
 
-          **macOS** \`.dmg\` (Intel + Apple Silicon) — signed with a Developer ID, hardened runtime, **notarized by Apple and stapled**. The disk image itself carries the ticket, so Gatekeeper clears it offline.
+          **macOS** \`.dmg\` (Intel + Apple Silicon) — signed with a Developer ID, hardened runtime, **notarized by Apple and stapled**. The disk image itself carries the ticket, so Gatekeeper clears it offline: no \`xattr\` dance, no \"damaged\" dialog.
 
           **Linux** \`.deb\` / \`.AppImage\` — no OS-level notary exists on Linux, so every artifact ships with Sigstore build provenance instead:
 
@@ -194,3 +232,17 @@ jobs:
           \`\`\`
 
           \`SHA256SUMS\` covers every asset on this release. The **Windows** build remains unsigned (no Authenticode certificate); see the README."
+
+          # A re-dispatch on the same day targets a release that already
+          # exists (main-<date> is date-derived), so replace its assets rather
+          # than failing. --latest is explicit: gh's automatic choice is
+          # date/semver based, and a main-<date> tag is neither.
+          if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
+            gh release view "$TAG" --repo "$REPO" --json assets --jq '.assets[].name' \
+              | while read -r a; do gh release delete-asset "$TAG" "$a" --repo "$REPO" -y; done
+            gh release upload "$TAG" dist/* --repo "$REPO"
+            gh release edit "$TAG" --repo "$REPO" --latest --title "$TITLE" --notes "$NOTES"
+          else
+            gh release create "$TAG" dist/* --repo "$REPO" --latest \
+              --title "$TITLE" --notes "$NOTES"
+          fi
