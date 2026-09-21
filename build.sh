@@ -224,7 +224,11 @@ setup_keychain() {
     -s -k "$kcpw" "$KEYCHAIN" >/dev/null
   rm -f "$p12"
 
-  security find-identity -v -p codesigning "$KEYCHAIN" | grep -q "Developer ID Application"
+  # Same pipefail/SIGPIPE trap as in verify_dmg — capture, then match.
+  local found
+  found="$(security find-identity -v -p codesigning "$KEYCHAIN" 2>&1 || true)"
+  case "$found" in (*"Developer ID Application"*) return 0 ;; esac
+  return 1
 }
 
 if [ "$SIGNED" = 1 ] && [ -n "${CSC_LINK:-}" ]; then
@@ -509,11 +513,23 @@ verify_dmg() {
       || { echo "ERROR: $base: app has no stapled ticket" >&2; rc=1; }
     # Hardened runtime is a prerequisite of notarization; assert it anyway so
     # a config regression cannot quietly drop it.
-    codesign -d --verbose=4 "$app" 2>&1 | grep -q 'flags=.*runtime' \
-      || { echo "ERROR: $base: app is not built with the hardened runtime" >&2; rc=1; }
+    # Capture first, match second. `cmd | grep -q` is a trap under
+    # `set -o pipefail`: grep -q exits the instant it matches, the writer
+    # takes SIGPIPE and reports 141, and the pipeline fails *because the
+    # match succeeded*. Both of these would then reject a good artifact.
+    local desc assess
+    desc="$(codesign -d --verbose=4 "$app" 2>&1 || true)"
+    case "$desc" in
+      *flags=*runtime*) ;;
+      *) echo "ERROR: $base: app is not built with the hardened runtime" >&2; rc=1 ;;
+    esac
     # The verdict that matters: not merely signed, but NOTARIZED.
-    spctl -a -t exec -vv "$app" 2>&1 | grep -q 'source=Notarized Developer ID' \
-      || { echo "ERROR: $base: app is not accepted as Notarized Developer ID" >&2; rc=1; }
+    assess="$(spctl -a -t exec -vv "$app" 2>&1 || true)"
+    case "$assess" in
+      *"source=Notarized Developer ID"*) ;;
+      *) echo "ERROR: $base: app is not accepted as Notarized Developer ID" >&2
+         echo "$assess" >&2; rc=1 ;;
+    esac
   fi
 
   hdiutil detach "$mp" -quiet 2>/dev/null || hdiutil detach "$mp" -force -quiet 2>/dev/null
