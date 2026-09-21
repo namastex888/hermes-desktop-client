@@ -312,7 +312,34 @@ fetch_source
 git -C "$SRC" clean -xdf -e node_modules -e apps/desktop/node_modules
 
 # ------------------------------------------------------------------ deps ----
-( cd "$SRC" && npm ci --no-audit --no-fund )
+# Retry: `npm ci` here is not just a registry fetch. Electron's postinstall
+# (`node install.js`) downloads the ~100MB Electron binary from a separate
+# host, and that host returns 5xx often enough to break a build on its own:
+#
+#   npm error command sh -c node install.js
+#   npm error HTTPError: Response code 504 (Gateway Time-out)
+#
+# Nothing about that is our tree, and the next attempt normally succeeds — the
+# same shape as the upstream-clone 429s and the keychain race, both of which
+# already retry. An unretried transient here fails a 30-minute three-platform
+# release build at its second minute.
+install_deps() {
+  local attempt=1 max=4 delay=15
+  while true; do
+    if ( cd "$SRC" && npm ci --no-audit --no-fund ); then
+      return 0
+    fi
+    if [ "$attempt" -ge "$max" ]; then
+      echo "ERROR: npm ci failed after $max attempts" >&2
+      return 1
+    fi
+    echo "==> npm ci failed (attempt $attempt/$max) — retrying in ${delay}s" >&2
+    sleep "$delay"
+    delay=$((delay * 2))
+    attempt=$((attempt + 1))
+  done
+}
+install_deps
 
 # MIT requires the licence + copyright notice to ship with binaries. Upstream's
 # packaging bundles only the Electron/Chromium licences, so add theirs. Shipped
