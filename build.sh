@@ -376,12 +376,19 @@ run_builder() {
 # on the very next run. It is a race in the keychain setup, not a bad password,
 # so the cure is to try again rather than to go digging in the secrets.
 #
-# Retry the whole packaging step, then, if every signed attempt lost the race,
-# fall back to an unsigned build. A stalled release channel is worse than an
-# unsigned dmg: unsigned is what this repo shipped before signing existed, it
-# is what the release notes already promise, and install.sh clears the
-# quarantine flag for it. The fallback is loud so a genuinely broken
-# certificate still shows up in the log instead of silently downgrading.
+# Retry the whole packaging step — the keychain race is transient and the next
+# attempt normally wins.
+#
+# There is deliberately NO unsigned fallback. This used to downgrade to an
+# unsigned build when every signed attempt failed, on the reasoning that a
+# stalled release channel is worse than an unsigned dmg. That trade is wrong
+# for a signed channel: the fallback turns a loud, fixable signing failure into
+# a green build that publishes an artifact Gatekeeper rejects, and it does so
+# at exactly the moment nobody is watching (a 06:30 cron). Shipping an
+# unsigned binary under a release that claims to be notarized is worse than
+# shipping nothing, so when the credentials are present, signing is mandatory
+# and a failure is fatal. Set ALLOW_UNSIGNED=1 to opt back in — for local
+# experiments, never in CI.
 BUILD_ATTEMPTS="${BUILD_ATTEMPTS:-3}"
 attempt=1
 while true; do
@@ -394,9 +401,9 @@ while true; do
     attempt=$((attempt + 1))
     continue
   fi
-  if [ "$SIGNED" = 1 ]; then
-    echo "==> WARNING: $BUILD_ATTEMPTS signed builds failed; retrying UNSIGNED" >&2
-    echo "==> WARNING: the published dmg will not be signed or notarized" >&2
+  if [ "$SIGNED" = 1 ] && [ "${ALLOW_UNSIGNED:-0}" = 1 ]; then
+    echo "==> WARNING: $BUILD_ATTEMPTS signed builds failed; ALLOW_UNSIGNED=1 — retrying UNSIGNED" >&2
+    echo "==> WARNING: the resulting dmg will not be signed or notarized" >&2
     MAC_SIGN=()
     SIGNED=0
     unset CSC_LINK CSC_KEY_PASSWORD APPLE_ID APPLE_APP_SPECIFIC_PASSWORD APPLE_TEAM_ID
@@ -404,6 +411,7 @@ while true; do
     break
   fi
   echo "ERROR: build failed after $BUILD_ATTEMPTS attempts" >&2
+  [ "$SIGNED" = 1 ] && echo "ERROR: signing credentials were present — refusing to publish unsigned" >&2
   exit 1
 done
 
@@ -416,6 +424,117 @@ for f in release/*.deb release/*.AppImage release/*.dmg release/*.exe; do
   found=1
 done
 [ "$found" = 1 ] || { echo "ERROR: no installer produced" >&2; exit 1; }
+
+# -------------------------------------------------------- notarize (mac) ----
+# electron-builder's `notarize` option notarizes and staples the .app during
+# its afterSign phase — which runs BEFORE the dmg is packaged. The dmg built
+# around that app is itself left unsigned and unstapled. That is what this
+# repo published for every signed release so far:
+#
+#   $ codesign -dv Hermes-2026.9.14-mac-arm64.dmg
+#   code object is not signed at all
+#   $ xcrun stapler validate Hermes-2026.9.14-mac-arm64.dmg
+#   ...does not have a ticket stapled to it
+#   $ spctl -a -t open --context context:primary-signature -v <dmg>
+#   rejected (source=no usable signature)
+#
+# The app INSIDE verified clean the entire time — "accepted, source=Notarized
+# Developer ID" — so the build logs said "notarization successful" and nothing
+# ever looked wrong. But the dmg is what the user downloads, and the dmg is
+# what carries the quarantine bit. Gatekeeper evaluates the disk image first,
+# finds no signature and no ticket, and blocks it. That is the "damaged"
+# dialog the README has been telling people to defeat with
+# `xattr -dr com.apple.quarantine` — not a quirk of unsigned builds, a real
+# gap in this pipeline.
+#
+# So: sign the container, notarize the container, staple the ticket to it.
+# The stapling is what buys OFFLINE verification. Without a stapled ticket
+# Gatekeeper must reach Apple to confirm the notarization, and a first launch
+# on a plane or behind a strict firewall fails.
+signing_identity() {
+  security find-identity -v -p codesigning 2>/dev/null \
+    | awk '/Developer ID Application/ { print $2; exit }'
+}
+
+notarize_dmg() {
+  local dmg="$1" id="$2" base
+  base="$(basename "$dmg")"
+
+  # --timestamp is not optional: notarytool rejects a signature that carries
+  # no secure timestamp. --force replaces any signature already there.
+  echo "==> signing $base"
+  codesign --sign "$id" --timestamp --force "$dmg"
+
+  echo "==> notarizing $base (waiting on Apple)"
+  # --wait blocks until Apple returns a verdict; a non-Accepted status exits
+  # non-zero, which fails the build rather than shipping an unstapled dmg.
+  xcrun notarytool submit "$dmg" \
+    --apple-id "$APPLE_ID" \
+    --password "$APPLE_APP_SPECIFIC_PASSWORD" \
+    --team-id "$APPLE_TEAM_ID" \
+    --wait --timeout 30m
+
+  echo "==> stapling $base"
+  xcrun stapler staple "$dmg"
+}
+
+# verify_dmg — the gate. Checks the artifact the way a user's Mac will, not
+# the way the build wishes it were. Every check is on the FILE AS SHIPPED.
+verify_dmg() {
+  local dmg="$1" base mp app
+  base="$(basename "$dmg")"
+  echo "==> verifying $base"
+
+  # 1. Container carries a stapled ticket -> Gatekeeper clears it offline.
+  xcrun stapler validate "$dmg" \
+    || { echo "ERROR: $base has no stapled notarization ticket" >&2; return 1; }
+
+  # 2. Gatekeeper's verdict on the disk image itself.
+  spctl -a -t open --context context:primary-signature -v "$dmg" \
+    || { echo "ERROR: $base is rejected by Gatekeeper" >&2; return 1; }
+
+  # 3. The app inside: mount read-only and assess it as Finder would.
+  mp="$(mktemp -d)"
+  hdiutil attach "$dmg" -nobrowse -readonly -mountpoint "$mp" -quiet \
+    || { echo "ERROR: cannot mount $base" >&2; rmdir "$mp"; return 1; }
+  app="$(find "$mp" -maxdepth 1 -name '*.app' -print -quit)"
+
+  local rc=0
+  if [ -z "$app" ]; then
+    echo "ERROR: no .app inside $base" >&2; rc=1
+  else
+    codesign --verify --deep --strict "$app" 2>/dev/null \
+      || { echo "ERROR: $base: app signature is not valid" >&2; rc=1; }
+    xcrun stapler validate "$app" >/dev/null 2>&1 \
+      || { echo "ERROR: $base: app has no stapled ticket" >&2; rc=1; }
+    # Hardened runtime is a prerequisite of notarization; assert it anyway so
+    # a config regression cannot quietly drop it.
+    codesign -d --verbose=4 "$app" 2>&1 | grep -q 'flags=.*runtime' \
+      || { echo "ERROR: $base: app is not built with the hardened runtime" >&2; rc=1; }
+    # The verdict that matters: not merely signed, but NOTARIZED.
+    spctl -a -t exec -vv "$app" 2>&1 | grep -q 'source=Notarized Developer ID' \
+      || { echo "ERROR: $base: app is not accepted as Notarized Developer ID" >&2; rc=1; }
+  fi
+
+  hdiutil detach "$mp" -quiet 2>/dev/null || hdiutil detach "$mp" -force -quiet 2>/dev/null
+  rmdir "$mp" 2>/dev/null || true
+  [ "$rc" = 0 ] && echo "==> $base: signed, notarized, stapled, Gatekeeper-accepted"
+  return "$rc"
+}
+
+if [ "$PLATFORM" = mac ] && [ "$SIGNED" = 1 ]; then
+  IDENTITY="$(signing_identity)"
+  [ -n "$IDENTITY" ] || { echo "ERROR: no Developer ID Application identity found" >&2; exit 1; }
+  for dmg in "$OUT"/*.dmg; do
+    notarize_dmg "$dmg" "$IDENTITY"
+  done
+  for dmg in "$OUT"/*.dmg; do
+    verify_dmg "$dmg" || { echo "ERROR: notarization gate failed" >&2; exit 1; }
+  done
+  echo "==> all mac artifacts are notarized end to end"
+elif [ "$PLATFORM" = mac ]; then
+  echo "==> WARNING: no signing credentials — the dmg is unsigned and NOT notarized" >&2
+fi
 
 # ------------------------------------------------------------------ gate ----
 # Fail loudly if server bloat ever leaks in — that is the whole point.
@@ -435,3 +554,20 @@ if [ "$PLATFORM" = linux ]; then
   [ "$SIZES" -ge 3 ] || { echo "ERROR: standard icon sizes missing (got $SIZES)" >&2; exit 1; }
   echo "==> clean: no server components, licence + icon set present"
 fi
+
+# ------------------------------------------------------------ checksums ----
+# Printed, not written: the authoritative SHA256SUMS manifest is generated
+# once in the publish job over the MERGED set of artifacts from all three
+# platform builds. Writing a per-platform manifest here would produce three
+# files with the same name, and `merge-multiple: true` would silently keep
+# whichever landed last. These lines exist so a build log can be matched
+# against a published artifact after the fact.
+echo "==> sha256:"
+for f in "$OUT"/*; do
+  [ -f "$f" ] || continue
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$f" | sed "s|$OUT/||"
+  else
+    shasum -a 256 "$f" | sed "s|$OUT/||"
+  fi
+done

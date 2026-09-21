@@ -3,7 +3,7 @@
 #
 #   curl -fsSL https://raw.githubusercontent.com/namastex888/hermes-desktop-client/main/install.sh | sh
 #
-# Nightly channel (rolling build of upstream main, macOS dmg only):
+# Nightly channel (rolling build of upstream main, macOS + Linux):
 #
 #   curl -fsSL https://raw.githubusercontent.com/namastex888/hermes-desktop-client/main/install.sh | sh -s -- --nightly
 #
@@ -42,6 +42,38 @@ asset_url() {
     | head -1
 }
 
+# ------------------------------------------------------------- integrity ----
+# Every release carries a SHA256SUMS manifest covering all of its assets.
+# Verify each download against it. Releases cut before the manifest existed
+# simply do not have the asset — warn and continue rather than refusing to
+# install from an older release.
+sha256_of() {
+  if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | cut -d' ' -f1
+  elif command -v shasum >/dev/null 2>&1; then shasum -a 256 "$1" | cut -d' ' -f1
+  else return 1
+  fi
+}
+
+verify_sha() {
+  # $1 = downloaded file, $2 = the asset name as published
+  _sums_url=$(asset_url 'SHA256SUMS$') || true
+  if [ -z "${_sums_url:-}" ]; then
+    say "note: this release predates SHA256SUMS — skipping checksum verification"
+    return 0
+  fi
+  _want=$(curl -fsSL "$_sums_url" | grep -- " \*\{0,1\}$2\$" | cut -d' ' -f1 | head -1)
+  if [ -z "${_want:-}" ]; then
+    say "note: $2 is absent from SHA256SUMS — skipping checksum verification"
+    return 0
+  fi
+  _got=$(sha256_of "$1") || { say "note: no sha256 tool available — skipping verification"; return 0; }
+  [ "$_got" = "$_want" ] || fail "checksum mismatch for $2
+  expected $_want
+  got      $_got
+This download does not match the published manifest. Do not install it."
+  say "checksum verified"
+}
+
 OS=$(uname -s)
 ARCH=$(uname -m)
 # electron-builder names assets per-arch; pick the matching one rather than
@@ -61,6 +93,7 @@ Linux)
     TMP=$(mktemp -d); trap 'rm -rf "$TMP"' EXIT
     say "downloading $(basename "$URL")"
     curl -fsSL -o "$TMP/pkg.deb" "$URL"
+    verify_sha "$TMP/pkg.deb" "$(basename "$URL")"
     say "installing (sudo)"
     if command -v apt >/dev/null 2>&1; then
       sudo apt install -y "$TMP/pkg.deb"
@@ -75,6 +108,7 @@ Linux)
     DEST="$HOME/.local/bin/hermes-desktop"
     say "downloading AppImage"
     curl -fsSL -o "$DEST" "$URL"
+    verify_sha "$DEST" "$(basename "$URL")"
     chmod +x "$DEST"
     say "installed at $DEST"
     case ":$PATH:" in
@@ -90,6 +124,7 @@ Darwin)
   TMP=$(mktemp -d); trap 'rm -rf "$TMP"' EXIT
   say "downloading $(basename "$URL")"
   curl -fsSL -o "$TMP/hermes.dmg" "$URL"
+  verify_sha "$TMP/hermes.dmg" "$(basename "$URL")"
   say "mounting"
   MNT=$(hdiutil attach -nobrowse -readonly "$TMP/hermes.dmg" | awk '/\/Volumes\//{print substr($0, index($0,"/Volumes/"))}' | head -1)
   [ -n "$MNT" ] || fail "could not mount the dmg"
@@ -99,8 +134,19 @@ Darwin)
   rm -rf "/Applications/$(basename "$APP")"
   cp -R "$APP" /Applications/
   hdiutil detach "$MNT" >/dev/null
-  # Unsigned build: strip the quarantine bit or Gatekeeper refuses to open it.
-  xattr -dr com.apple.quarantine "/Applications/$(basename "$APP")" 2>/dev/null || true
+  # The dmg and the app inside are both notarized and stapled, so Gatekeeper
+  # clears them on its own — offline, from the stapled ticket. Do NOT strip
+  # the quarantine bit here: on a notarized build it buys nothing, and it
+  # would throw away the one signal that tells a user this really is our
+  # build. Verify instead, and only fall back to stripping when the app is
+  # genuinely not notarized (an old release, or a local unsigned build).
+  INSTALLED="/Applications/$(basename "$APP")"
+  if spctl -a -t exec -vv "$INSTALLED" 2>&1 | grep -q 'source=Notarized Developer ID'; then
+    say "verified: notarized by Apple, signed by the Developer ID on record"
+  else
+    say "WARNING: this build is not notarized — clearing the quarantine flag so it will open"
+    xattr -dr com.apple.quarantine "$INSTALLED" 2>/dev/null || true
+  fi
   say "installed. Launch Hermes from /Applications."
   ;;
 # ---------------------------------------------------------------- windows ----
