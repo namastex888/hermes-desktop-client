@@ -456,8 +456,14 @@ done
 # Gatekeeper must reach Apple to confirm the notarization, and a first launch
 # on a plane or behind a strict firewall fails.
 signing_identity() {
-  security find-identity -v -p codesigning 2>/dev/null \
-    | awk '/Developer ID Application/ { print $2; exit }'
+  # Capture, then parse. `security | awk '{...; exit}'` is the same
+  # pipefail/SIGPIPE trap as the checks in verify_dmg: awk's `exit` can close
+  # the pipe while security is still writing, security reports 141, and under
+  # `set -o pipefail` the command substitution fails — taking `set -e` and the
+  # whole build with it, on the one line that decides whether we can sign.
+  local ids
+  ids="$(security find-identity -v -p codesigning 2>/dev/null || true)"
+  printf '%s\n' "$ids" | awk '/Developer ID Application/ { print $2; exit }'
 }
 
 notarize_dmg() {
