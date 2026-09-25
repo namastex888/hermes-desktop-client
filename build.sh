@@ -432,6 +432,19 @@ JS
 export HDC_PKG="$PKG" HDC_HOMEPAGE="$UPSTREAM_WEB" HDC_REPOSITORY="$SELF_WEB"
 [ "$PLATFORM" = linux ] && export HDC_LINUX_ICON=build-icons
 
+# The mac packaging tools fetch dmgbuild through upstream's `pm` package
+# (prepare_dmgbuild.py), launched via $HERMES_PYTHON and nothing else:
+#
+#   Error: Set HERMES_PYTHON to the prepared build interpreter
+#
+# Upstream CI gets one from its setup-pm action. pm bootstraps on the
+# standard library alone, so the runner's own python3 serves.
+if [ "$PLATFORM" = mac ] && [ -z "${HERMES_PYTHON:-}" ]; then
+  HERMES_PYTHON="$(command -v python3)" \
+    || { echo "ERROR: python3 is required to prepare dmgbuild" >&2; exit 1; }
+  export HERMES_PYTHON
+fi
+
 npm run build
 
 # Native deps, staged outside the source tree. Given arch flags, upstream's
