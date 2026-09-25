@@ -150,12 +150,17 @@ if [ -z "$PLATFORM" ]; then
   esac
 fi
 
+# One builder run per arch: upstream's prepared packaging stages native deps
+# and packaging tools for a single platform-arch target at a time.
 case "$PLATFORM" in
-  linux) TARGETS=(--linux deb AppImage) ;;
+  linux) TARGETS=(--linux deb AppImage); ARCHES=(x64); NODE_PLATFORM=linux ;;
   # Both arches: the macOS runner is Apple Silicon, so an arm64-only build
   # would leave Intel Macs with no installer.
-  mac)   TARGETS=(--mac dmg --x64 --arm64) ;;
-  win)   TARGETS=(--win nsis) ;;
+  mac)   TARGETS=(--mac dmg); ARCHES=(x64 arm64); NODE_PLATFORM=darwin ;;
+  # Upstream's prepared packaging admits only msix/zip/dir on Windows, and
+  # msix will not install unsigned. Pack the app dir the gated way, then wrap
+  # that tree in nsis ourselves (see pack_nsis).
+  win)   TARGETS=(--win --dir); ARCHES=(x64); NODE_PLATFORM=win32 ;;
   *) echo "ERROR: unknown platform '$PLATFORM'" >&2; exit 1 ;;
 esac
 
@@ -164,10 +169,14 @@ esac
 # are in the environment, and notarizes when told to (APPLE_ID,
 # APPLE_APP_SPECIFIC_PASSWORD, APPLE_TEAM_ID). All five are CI secrets — on
 # forks and local builds they are absent and the dmg stays unsigned as before.
-MAC_SIGN=()
+#
+# Upstream's config signs with the hardened runtime itself and leaves
+# notarization to its afterSign hook (scripts/notarize.mjs), which only speaks
+# APPLE_NOTARY_PROFILE or an App Store Connect API key — and prepared packaging
+# rejects -c.mac.notarize anyway. So the Apple ID secrets are turned into a
+# notarytool keychain profile below (store_notary_profile).
 SIGNED=0
 if [ "$PLATFORM" = mac ] && [ -n "${APPLE_ID:-}" ]; then
-  MAC_SIGN=(-c.mac.notarize=true -c.mac.hardenedRuntime=true)
   SIGNED=1
   echo "==> mac signing + notarization enabled"
 fi
@@ -231,12 +240,27 @@ setup_keychain() {
   return 1
 }
 
+# store_notary_profile — the Apple ID credentials as a notarytool profile in
+# our keychain, which is first in the search list, so the hook's
+# `notarytool --keychain-profile` finds it. notarytool validates the
+# credentials against Apple here, so a bad secret fails before any packaging.
+NOTARY_PROFILE=hermes-desktop-client
+store_notary_profile() {
+  xcrun notarytool store-credentials "$NOTARY_PROFILE" \
+    --apple-id "$APPLE_ID" \
+    --password "$APPLE_APP_SPECIFIC_PASSWORD" \
+    --team-id "$APPLE_TEAM_ID" \
+    --keychain "$HOME/Library/Keychains/$KEYCHAIN-db"
+}
+
 if [ "$SIGNED" = 1 ] && [ -n "${CSC_LINK:-}" ]; then
   mkdir -p "$WORK"
   if setup_keychain; then
     echo "==> signing identity imported into $KEYCHAIN"
     export CSC_KEYCHAIN="$KEYCHAIN"
     unset CSC_LINK CSC_KEY_PASSWORD
+    store_notary_profile
+    export APPLE_NOTARY_PROFILE="$NOTARY_PROFILE"
   else
     # Not fatal: leave CSC_LINK in place and let electron-builder try its own
     # import, with the retry/unsigned fallback below as the last line of defence.
@@ -353,7 +377,6 @@ cp "$SRC/LICENSE" "$SRC/apps/desktop/LICENSE"
 # it to hicolor/1024x1024 — a size the hicolor index.theme does not declare.
 # GTK then reports has_icon=true but resolves no file, and the launcher shows a
 # blank tile with no dock entry. Generate the standard sizes instead.
-ICON_FLAGS=()
 if [ "$PLATFORM" = linux ]; then
   ICONS="$SRC/apps/desktop/build-icons"
   rm -rf "$ICONS"; mkdir -p "$ICONS"
@@ -374,27 +397,67 @@ PY
     echo "ERROR: need python3-pil or imagemagick to generate the icon set" >&2
     exit 1
   fi
-  ICON_FLAGS=(-c.linux.icon=build-icons)
 fi
 
 # ----------------------------------------------------------------- build ----
-# Everything upstream omits is supplied here as electron-builder flags, so the
-# upstream tree stays byte-identical to the tag we checked out.
+# Upstream packages through "prepared packaging": run-electron-builder.mjs
+# admits only a handful of -c overrides (version, output dir, mac identity) and
+# rejects the rest —
+#
+#   Error: Argument is not admitted by prepared packaging:
+#   -c.linux.icon=build-icons; run preparation again
+#
+# So what we used to pass as flags is appended to upstream's config instead.
+# The config file is hashed into the preparation identity, but both the
+# prepare and the consume step read the edited file, so they agree. Values come
+# in through the environment rather than being spliced into JS source.
+# extraResources is appended to, not replaced: the old -c.extraResources=LICENSE
+# flag clobbered upstream's own entries.
 cd "$SRC/apps/desktop"
+cat >> electron-builder.config.cjs <<'JS'
+
+// ---- hermes-desktop-client overlay (appended by build.sh) ----
+{
+  const env = process.env
+  const config = module.exports
+  Object.assign(config.extraMetadata, {
+    name: env.HDC_PKG,
+    homepage: env.HDC_HOMEPAGE,
+    repository: env.HDC_REPOSITORY
+  })
+  config.extraResources = [...(config.extraResources || []), 'LICENSE']
+  if (env.HDC_LINUX_ICON) config.linux = { ...config.linux, icon: env.HDC_LINUX_ICON }
+}
+JS
+export HDC_PKG="$PKG" HDC_HOMEPAGE="$UPSTREAM_WEB" HDC_REPOSITORY="$SELF_WEB"
+[ "$PLATFORM" = linux ] && export HDC_LINUX_ICON=build-icons
+
 npm run build
-# --publish never + a repository field: the AppImage/nsis/dmg targets resolve an
-# auto-update publish config (deb does not), and upstream sets no `repository`.
-# We ship no updater — apt / re-running install.sh is the update path — so the
-# config exists only to satisfy the packager.
-# ${a[@]+"${a[@]}"} — bash 3.2 (macOS) errors on an empty array under set -u.
+
+# Native deps, staged outside the source tree. Given arch flags, upstream's
+# runner stages into apps/desktop/build/native-deps-<target>, which its own
+# output guard then refuses:
+#
+#   Error: Output must be outside source or in a supported generated
+#   destination: .../apps/desktop/build/native-deps-darwin-x64
+#
+# Passing --native-deps skips that staging. It takes one arch per call.
+for arch in "${ARCHES[@]}"; do
+  node scripts/stage-native-deps.mjs --source "$SRC" \
+    --out "$WORK/native-deps-$NODE_PLATFORM-$arch" \
+    --platform "$NODE_PLATFORM" --arch "$arch"
+done
+
+# --publish never: we ship no updater — apt / re-running install.sh is the
+# update path.
 run_builder() {
-  npm run builder -- "${TARGETS[@]}" ${ICON_FLAGS[@]+"${ICON_FLAGS[@]}"} \
-    ${MAC_SIGN[@]+"${MAC_SIGN[@]}"} --publish never \
-    -c.extraMetadata.name="$PKG" \
-    -c.extraMetadata.version="$VER" \
-    -c.extraMetadata.homepage="$UPSTREAM_WEB" \
-    -c.extraMetadata.repository="$SELF_WEB" \
-    -c.extraResources=LICENSE
+  local arch
+  for arch in "${ARCHES[@]}"; do
+    npm run builder -- "${TARGETS[@]}" "--$arch" \
+      --native-deps "$WORK/native-deps-$NODE_PLATFORM-$arch" \
+      --publish never \
+      -c.extraMetadata.version="$VER" || return 1
+  done
 }
 
 # electron-builder imports the p12 into a throwaway keychain, and that import
@@ -435,9 +498,9 @@ while true; do
   if [ "$SIGNED" = 1 ] && [ "${ALLOW_UNSIGNED:-0}" = 1 ]; then
     echo "==> WARNING: $BUILD_ATTEMPTS signed builds failed; ALLOW_UNSIGNED=1 — retrying UNSIGNED" >&2
     echo "==> WARNING: the resulting dmg will not be signed or notarized" >&2
-    MAC_SIGN=()
     SIGNED=0
-    unset CSC_LINK CSC_KEY_PASSWORD APPLE_ID APPLE_APP_SPECIFIC_PASSWORD APPLE_TEAM_ID
+    unset CSC_LINK CSC_KEY_PASSWORD CSC_KEYCHAIN APPLE_NOTARY_PROFILE \
+      APPLE_ID APPLE_APP_SPECIFIC_PASSWORD APPLE_TEAM_ID
     run_builder
     break
   fi
@@ -445,6 +508,17 @@ while true; do
   [ "$SIGNED" = 1 ] && echo "ERROR: signing credentials were present — refusing to publish unsigned" >&2
   exit 1
 done
+
+# ------------------------------------------------------------- nsis (win) ----
+# The gated run above produced release/win-unpacked. --prepackaged packs that
+# tree as-is into the nsis installer install.ps1 downloads; it is the upstream
+# pinned electron-builder, reading the same (overlaid) config.
+if [ "$PLATFORM" = win ]; then
+  npx --no-install electron-builder \
+    --prepackaged release/win-unpacked --win nsis --x64 \
+    --config electron-builder.config.cjs --publish never \
+    -c.extraMetadata.version="$VER"
+fi
 
 # --------------------------------------------------------------- collect ----
 shopt -s nullglob
